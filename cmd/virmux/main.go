@@ -40,6 +40,19 @@ type runRuntime struct {
 	runID func(task string, started time.Time) string
 }
 
+type transportStats struct {
+	Attempts    int   `json:"attempts"`
+	HandshakeMS int64 `json:"handshake_ms"`
+}
+
+type runTransport interface {
+	Stats() transportStats
+}
+
+type serialTransport struct{}
+
+func (serialTransport) Stats() transportStats { return transportStats{} }
+
 const (
 	tracePrimaryName = "trace.ndjson"
 	traceCompatName  = "trace.jsonl"
@@ -108,7 +121,10 @@ func parseVMRunArgs(name string, args []string, defaultCmd string) (*runCommon, 
 	return cfg, command, nil
 }
 
-func newVMRunRunner(cfg *runCommon, command string, requiredMarkers []string) vmRunner {
+func newVMRunRunner(cfg *runCommon, command string, requiredMarkers []string, tr runTransport) vmRunner {
+	if tr == nil {
+		tr = serialTransport{}
+	}
 	return func(ctx context.Context, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
 		var emitErr error
 		vsockPath := ""
@@ -135,18 +151,24 @@ func newVMRunRunner(cfg *runCommon, command string, requiredMarkers []string) vm
 		if emitErr != nil {
 			return vm.Outcome{}, nil, emitErr
 		}
-		details := map[string]any{
-			"serial_log":     filepath.Join(runDir, "serial.log"),
-			"fc_log":         filepath.Join(runDir, "fc.log"),
-			"fc_metrics_log": filepath.Join(runDir, "fc.metrics.log"),
-			"lost_logs":      outcome.LostLogs,
-			"lost_metrics":   outcome.LostMetrics,
-			"guest_ready_ms": outcome.GuestReadyMS,
-		}
+		details := makeRunnerDetails(runDir, outcome, tr.Stats())
 		if vsockPath != "" {
 			details["vsock_uds_path"] = vsockPath
 		}
 		return outcome, details, err
+	}
+}
+
+func makeRunnerDetails(runDir string, outcome vm.Outcome, trStats transportStats) map[string]any {
+	return map[string]any{
+		"serial_log":       filepath.Join(runDir, "serial.log"),
+		"fc_log":           filepath.Join(runDir, "fc.log"),
+		"fc_metrics_log":   filepath.Join(runDir, "fc.metrics.log"),
+		"lost_logs":        outcome.LostLogs,
+		"lost_metrics":     outcome.LostMetrics,
+		"guest_ready_ms":   outcome.GuestReadyMS,
+		"connect_attempts": trStats.Attempts,
+		"handshake_ms":     trStats.HandshakeMS,
 	}
 }
 
@@ -217,7 +239,7 @@ func cmdVMRun(args []string) error {
 		cfg,
 		"vm:run",
 		map[string]any{"label": cfg.label, "cmd": command},
-		newVMRunRunner(cfg, command, nil),
+		newVMRunRunner(cfg, command, nil, serialTransport{}),
 		defaultRunRuntime,
 	)
 }
@@ -231,7 +253,7 @@ func cmdVMSmoke(args []string) error {
 		cfg,
 		"vm:smoke",
 		map[string]any{"label": cfg.label, "cmd": command},
-		newVMRunRunner(cfg, command, []string{"Linux", "ok"}),
+		newVMRunRunner(cfg, command, []string{"Linux", "ok"}, serialTransport{}),
 		defaultRunRuntime,
 	)
 }

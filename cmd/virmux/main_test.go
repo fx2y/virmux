@@ -86,6 +86,21 @@ func TestParseVMRunArgsIncludesVsockCID(t *testing.T) {
 	}
 }
 
+func TestMakeRunnerDetailsIncludesTransportStats(t *testing.T) {
+	t.Parallel()
+	outcome := vm.Outcome{LostLogs: 2, LostMetrics: 3, GuestReadyMS: 12}
+	details := makeRunnerDetails("/tmp/run", outcome, transportStats{Attempts: 4, HandshakeMS: 55})
+	if got := details["connect_attempts"]; got != 4 {
+		t.Fatalf("expected connect_attempts=4, got %#v", got)
+	}
+	if got := details["handshake_ms"]; got != int64(55) {
+		t.Fatalf("expected handshake_ms=55, got %#v", got)
+	}
+	if got := details["guest_ready_ms"]; got != int64(12) {
+		t.Fatalf("expected guest_ready_ms=12, got %#v", got)
+	}
+}
+
 func TestResolveResumeSnapshotPathsPrefersAgentSnapshot(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
