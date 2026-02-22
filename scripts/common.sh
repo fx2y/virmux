@@ -47,10 +47,6 @@ read_image_sha_lock() {
 firecracker_from_lock_or_path() {
   local root
   root="$(repo_root)"
-  if command -v firecracker >/dev/null 2>&1; then
-    command -v firecracker
-    return 0
-  fi
   if [[ -f "$root/vm/images.lock" ]]; then
     local sha
     sha="$(read_image_sha_lock)"
@@ -59,6 +55,10 @@ firecracker_from_lock_or_path() {
       echo "$bin"
       return 0
     fi
+  fi
+  if command -v firecracker >/dev/null 2>&1; then
+    command -v firecracker
+    return 0
   fi
   echo ""
 }

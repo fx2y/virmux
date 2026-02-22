@@ -34,6 +34,9 @@ fc_path="$(firecracker_from_lock_or_path || true)"
 if [[ -z "$fc_path" ]]; then
   fail "firecracker binary not found (PATH or image cache from vm/images.lock)"
 fi
+if [[ ! -x "$fc_path" ]]; then
+  fail "firecracker binary is not executable: $fc_path"
+fi
 pass "firecracker binary found: $fc_path"
 
 lock_path="$root/vm/images.lock"
@@ -49,6 +52,9 @@ if [[ -f "$lock_path" ]]; then
       fail "lock-selected artifact missing: $target"
     fi
   done
+  if [[ ! -x "$image_dir/firecracker" ]]; then
+    fail "lock-selected firecracker is not executable: $image_dir/firecracker"
+  fi
   pass "lock-selected artifacts exist: $image_dir/{firecracker,vmlinux,rootfs.ext4}"
 else
   pass "vm/images.lock absent; artifact-set check skipped (bootstrap mode)"

@@ -68,10 +68,24 @@ outputs = ["runs/.last-zygote"]
 
 [tasks."vm:resume"]
 description = "Resume VM from latest snapshot and run quick command"
-depends = ["doctor", "image:stamp"]
+depends = ["doctor", "image:stamp", "vm:zygote"]
 run = "./scripts/vm_resume.sh"
 sources = ["scripts/vm_resume.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock"]
 outputs = ["runs/.last-resume", "runs/virmux.sqlite"]
+
+[tasks."vm:test:resume-fallback-nosnap"]
+description = "Guard: vm-resume falls back to cold boot when snapshot metadata is missing"
+depends = ["doctor", "image:stamp"]
+run = "./scripts/test_vm_resume_fallback_no_snapshot.sh"
+sources = ["scripts/test_vm_resume_fallback_no_snapshot.sh", "scripts/common.sh", "scripts/doctor.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock"]
+outputs = ["tmp/vm-resume-fallback-nosnap.ok", "runs/virmux.sqlite"]
+
+[tasks."vm:test:resume-snapshot-success"]
+description = "Guard: vm-resume succeeds in snapshot mode after zygote"
+depends = ["doctor", "image:stamp"]
+run = "./scripts/test_vm_resume_snapshot_success.sh"
+sources = ["scripts/test_vm_resume_snapshot_success.sh", "scripts/common.sh", "scripts/doctor.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock"]
+outputs = ["tmp/vm-resume-snapshot-success.ok", "runs/virmux.sqlite"]
 
 [tasks."vm:test:agent-persistence"]
 description = "Guard: per-agent data volume persists and isolates across runs"

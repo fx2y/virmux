@@ -122,3 +122,23 @@ func TestResolveResumeSnapshotPathsFallsBackToLatestJSON(t *testing.T) {
 		t.Fatalf("unexpected latest.json mapping: %+v", got)
 	}
 }
+
+func TestEnsureResumeTerminalPayloadDefaults(t *testing.T) {
+	t.Parallel()
+	payload := map[string]any{
+		"status": "failed",
+	}
+	ensureResumeTerminalPayload(payload)
+	if payload["resume_mode"] != resumeModeFallback {
+		t.Fatalf("expected fallback resume_mode, got %#v", payload["resume_mode"])
+	}
+	if payload["resume_mode_legacy"] != resumeModeSnapshotLegacy {
+		t.Fatalf("expected legacy snapshot mode, got %#v", payload["resume_mode_legacy"])
+	}
+	if payload["resume_source"] == "" {
+		t.Fatalf("expected non-empty resume_source")
+	}
+	if _, ok := payload["resume_error"]; !ok {
+		t.Fatalf("expected resume_error key")
+	}
+}

@@ -231,7 +231,7 @@ func cmdVMZygote(args []string) error {
 	}
 	cfg.timeout = time.Duration(*timeoutSec) * time.Second
 
-	return runWithStore(cfg, "vm:zygote", map[string]any{"label": cfg.label}, func(ctx context.Context, art vm.Artifacts, meta agent.Meta, runDir string, _ vmEventEmitter) (vm.Outcome, map[string]any, error) {
+	return runWithStore(cfg, "vm:zygote", map[string]any{"label": cfg.label}, func(ctx context.Context, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
 		base := *snapshotDir
 		if base == "" {
 			repoRoot := filepath.Dir(filepath.Dir(cfg.imagesLock))
@@ -239,7 +239,9 @@ func cmdVMZygote(args []string) error {
 		}
 		snapshotID := fmt.Sprintf("%d", time.Now().UTC().UnixNano())
 		snapshotPath := filepath.Join(base, snapshotID)
-		outcome, memPath, statePath, err := vm.Zygote(ctx, art, runDir, snapshotPath, cfg.memMiB, cfg.timeout, meta.VolumePath)
+		outcome, memPath, statePath, err := vm.ZygoteWithHook(ctx, art, runDir, snapshotPath, cfg.memMiB, cfg.timeout, meta.VolumePath, func(evt vm.Event) {
+			_ = emitVM(evt.Kind, evt.Payload)
+		})
 		if err != nil {
 			return outcome, nil, err
 		}
@@ -278,15 +280,34 @@ func cmdVMResume(args []string) error {
 	}
 	cfg.timeout = time.Duration(*timeoutSec) * time.Second
 
-	return runWithStore(cfg, "vm:resume", map[string]any{"label": cfg.label}, func(ctx context.Context, art vm.Artifacts, meta agent.Meta, runDir string, _ vmEventEmitter) (vm.Outcome, map[string]any, error) {
+	return runWithStore(cfg, "vm:resume", map[string]any{"label": cfg.label}, func(ctx context.Context, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
 		base := *snapshotDir
 		if base == "" {
 			repoRoot := filepath.Dir(filepath.Dir(cfg.imagesLock))
 			base = filepath.Join(repoRoot, "vm", "snapshots", art.ImageSHA, cfg.agentID)
 		}
+		runFallback := func(reason error, source string) (vm.Outcome, map[string]any, error) {
+			details := map[string]any{
+				"resume_mode":        resumeModeFallback,
+				"resume_mode_legacy": resumeModeSnapshotLegacy,
+				"resume_source":      source,
+				"resume_error":       reason.Error(),
+			}
+			fallbackDir := filepath.Join(runDir, "fallback-coldboot")
+			fallback, fbErr := vm.SmokeWithHook(ctx, art, fallbackDir, cfg.memMiB, cfg.timeout, meta.VolumePath, func(evt vm.Event) {
+				_ = emitVM(evt.Kind, evt.Payload)
+			})
+			if fbErr != nil {
+				return vm.Outcome{}, details, fmt.Errorf("snapshot resume failed (%v); fallback smoke failed (%v)", reason, fbErr)
+			}
+			fallback.ResumeMS = fallback.BootMS
+			fallback.BootMS = 0
+			details["fallback_trace"] = filepath.Join(fallbackDir, "serial.log")
+			return fallback, details, nil
+		}
 		resume, err := resolveResumeSnapshotPaths(base, meta, *memPath, *statePath)
 		if err != nil {
-			return vm.Outcome{}, nil, err
+			return runFallback(err, "snapshot_lookup_error")
 		}
 		details := map[string]any{
 			"mem_path":           resume.memPath,
@@ -298,23 +319,14 @@ func cmdVMResume(args []string) error {
 		if resume.snapshotID != "" {
 			details["snapshot_id"] = resume.snapshotID
 		}
-		outcome, err := vm.Resume(ctx, art, runDir, resume.memPath, resume.statePath, cfg.memMiB, cfg.timeout, meta.VolumePath)
+		outcome, err := vm.ResumeWithHook(ctx, art, runDir, resume.memPath, resume.statePath, cfg.memMiB, cfg.timeout, meta.VolumePath, func(evt vm.Event) {
+			_ = emitVM(evt.Kind, evt.Payload)
+		})
 		if err == nil {
 			details["resume_mode"] = resumeModeSnapshot
 			return outcome, details, nil
 		}
-		fallbackDir := filepath.Join(runDir, "fallback-coldboot")
-		fallback, fbErr := vm.Smoke(ctx, art, fallbackDir, cfg.memMiB, cfg.timeout, meta.VolumePath)
-		if fbErr != nil {
-			return vm.Outcome{}, nil, fmt.Errorf("snapshot resume failed (%v); fallback smoke failed (%v)", err, fbErr)
-		}
-		fallback.ResumeMS = fallback.BootMS
-		fallback.BootMS = 0
-		details["resume_mode"] = resumeModeFallback
-		details["resume_error"] = err.Error()
-		details["resume_source"] = "fallback_cold_boot"
-		details["fallback_trace"] = filepath.Join(fallbackDir, "serial.log")
-		return fallback, details, nil
+		return runFallback(err, "snapshot_resume_error")
 	}, defaultRunRuntime)
 }
 
@@ -384,6 +396,7 @@ func runWithStore(cfg *runCommon, task string, startedPayload map[string]any, ru
 	}
 	startedPayload["agent_id"] = cfg.agentID
 	if err := emit(ctx, st, tw, runID, task, "run.started", startedPayload, runtime.now); err != nil {
+		_ = st.FinishRun(ctx, runID, "failed", 0, 0, tracePath, "", 0, runtime.now().UTC())
 		return err
 	}
 
@@ -406,15 +419,14 @@ func runWithStore(cfg *runCommon, task string, startedPayload map[string]any, ru
 	for k, v := range details {
 		payload[k] = v
 	}
-	if err := emit(ctx, st, tw, runID, task, "run.finished", payload, runtime.now); err != nil {
-		return err
+	if task == "vm:resume" {
+		ensureResumeTerminalPayload(payload)
 	}
+	finishEmitErr := emit(ctx, st, tw, runID, task, "run.finished", payload, runtime.now)
 	snapshotID := stringDetail(payload, "snapshot_id")
 	costEst := estimateCost(outcome.BootMS, outcome.ResumeMS, cfg.memMiB)
-	if err := st.FinishRun(ctx, runID, status, outcome.BootMS, outcome.ResumeMS, tracePath, snapshotID, costEst, runtime.now().UTC()); err != nil {
-		return err
-	}
-	if err := persistRunArtifacts(ctx, st, runID, []string{
+	finishErr := st.FinishRun(ctx, runID, status, outcome.BootMS, outcome.ResumeMS, tracePath, snapshotID, costEst, runtime.now().UTC())
+	artifactErr := persistRunArtifacts(ctx, st, runID, []string{
 		filepath.Join(runDir, "serial.log"),
 		filepath.Join(runDir, "firecracker.stderr.log"),
 		tracePath,
@@ -422,9 +434,7 @@ func runWithStore(cfg *runCommon, task string, startedPayload map[string]any, ru
 		stringDetail(payload, "state_path"),
 		stringDetail(payload, "fallback_trace"),
 		stringDetail(payload, "vsock_uds_path"),
-	}); err != nil {
-		return err
-	}
+	})
 
 	summary, _ := json.Marshal(map[string]any{
 		"run_id":    runID,
@@ -437,10 +447,28 @@ func runWithStore(cfg *runCommon, task string, startedPayload map[string]any, ru
 	})
 	fmt.Println(string(summary))
 
+	if finishEmitErr != nil || finishErr != nil || artifactErr != nil {
+		return errors.Join(finishEmitErr, finishErr, artifactErr)
+	}
 	if runErr != nil {
 		return runErr
 	}
 	return nil
+}
+
+func ensureResumeTerminalPayload(payload map[string]any) {
+	if _, ok := payload["resume_mode"]; !ok {
+		payload["resume_mode"] = resumeModeFallback
+	}
+	if _, ok := payload["resume_mode_legacy"]; !ok {
+		payload["resume_mode_legacy"] = resumeModeSnapshotLegacy
+	}
+	if _, ok := payload["resume_source"]; !ok {
+		payload["resume_source"] = "unknown"
+	}
+	if _, ok := payload["resume_error"]; !ok {
+		payload["resume_error"] = ""
+	}
 }
 
 func estimateCost(bootMS, resumeMS, memMiB int64) float64 {

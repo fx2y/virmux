@@ -7,7 +7,7 @@ mkdir -p "$root/tmp"
 log="$root/tmp/cleanup-audit.log"
 
 orphans="$(pgrep -fa firecracker | rg -v 'defunct|rg -v' || true)"
-stale_socks="$(fd -t f 'firecracker\.sock$' "$root/runs" || true)"
+stale_socks="$(find "$root/runs" -type s -name 'firecracker.sock' -print)"
 tap_leftovers="$(ip -o link show | rg 'virmux-tap' || true)"
 
 {

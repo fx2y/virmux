@@ -7,20 +7,34 @@ iterations="${1:-5}"
 budget_p95_ms="${VIRMUX_BENCH_P95_MAX_MS:-6000}"
 budget_p50_ms="${VIRMUX_BENCH_P50_MAX_MS:-3500}"
 summary="$root/runs/bench-snapshot-summary.json"
+label="bench-snapshot-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 
 for _ in $(seq 1 "$iterations"); do
-  ./scripts/vm_resume.sh
+  ./scripts/vm_resume.sh --label "$label"
   sleep 0.2
 done
 
 stats="$(sqlite3 -json "$root/runs/virmux.sqlite" "
-WITH ranked AS (
+WITH finish AS (
+  SELECT
+    run_id,
+    json_extract(payload,'$.resume_mode') AS resume_mode
+  FROM events
+  WHERE kind='run.finished'
+),
+scoped AS (
+  SELECT r.id AS run_id, r.resume_ms, f.resume_mode
+  FROM runs r
+  LEFT JOIN finish f ON f.run_id = r.id
+  WHERE r.task='vm:resume' AND r.label='$label' AND r.status='ok'
+),
+ranked AS (
   SELECT
     CAST(resume_ms AS INTEGER) AS resume_ms,
     row_number() OVER (ORDER BY CAST(resume_ms AS INTEGER)) AS rn,
     count(*) OVER () AS cnt
-  FROM runs
-  WHERE task='vm:resume' AND status='ok'
+  FROM scoped
+  WHERE resume_mode='snapshot_resume'
   ORDER BY CAST(resume_ms AS INTEGER)
 ),
 agg AS (
@@ -31,20 +45,34 @@ agg AS (
   FROM ranked
 )
 SELECT
-  samples,
+  (SELECT COUNT(*) FROM scoped) AS total_samples,
+  (SELECT COUNT(*) FROM scoped WHERE resume_mode='snapshot_resume') AS snapshot_resume_count,
+  (SELECT COUNT(*) FROM scoped WHERE resume_mode='fallback_cold_boot') AS fallback_count,
+  samples AS slo_samples,
   p50_ms,
   p95_ms,
+  '$label' AS label,
   $iterations AS iterations,
   $budget_p50_ms AS budget_p50_ms,
   $budget_p95_ms AS budget_p95_ms,
   datetime('now') AS measured_at
 FROM agg;")"
 
-samples="$(printf '%s' "$stats" | jq -r '.[0].samples')"
+slo_samples="$(printf '%s' "$stats" | jq -r '.[0].slo_samples')"
+total_samples="$(printf '%s' "$stats" | jq -r '.[0].total_samples')"
+snapshot_resume_count="$(printf '%s' "$stats" | jq -r '.[0].snapshot_resume_count')"
 p50_ms="$(printf '%s' "$stats" | jq -r '.[0].p50_ms')"
 p95_ms="$(printf '%s' "$stats" | jq -r '.[0].p95_ms')"
-if [[ "$samples" -lt 1 ]]; then
-  echo "bench:snapshot: no vm:resume samples found" >&2
+if [[ "$total_samples" -ne "$iterations" ]]; then
+  echo "bench:snapshot: total_samples=$total_samples does not match iterations=$iterations" >&2
+  exit 1
+fi
+if [[ "$snapshot_resume_count" -lt 1 ]]; then
+  echo "bench:snapshot: no snapshot_resume samples found for label=$label" >&2
+  exit 1
+fi
+if [[ "$slo_samples" -lt 1 ]]; then
+  echo "bench:snapshot: no snapshot_resume SLO samples found for label=$label" >&2
   exit 1
 fi
 if [[ "$p50_ms" -gt "$budget_p50_ms" ]]; then

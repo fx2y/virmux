@@ -62,7 +62,7 @@ func TestRunRejectsNonPositiveTimeout(t *testing.T) {
 func TestSerialScriptWrapsMarkers(t *testing.T) {
 	t.Parallel()
 	got := serialScript("uname -a")
-	for _, want := range []string{"mount -t ext4 /dev/vdb /mnt/data", "__cmd_start__", "uname -a", "__cmd_end__", "poweroff -f"} {
+	for _, want := range []string{"mount -t ext4 /dev/vdb /dev/virmux-data", "__cmd_start__", "uname -a", "__cmd_end__", "poweroff -f"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("script missing marker %q: %q", want, got)
 		}

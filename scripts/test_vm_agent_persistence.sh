@@ -12,15 +12,18 @@ go run ./cmd/virmux vm-run \
   --db "$root/runs/virmux.sqlite" \
   --agent A \
   --label persist-1 \
-  --cmd "echo hi >/mnt/data/hi.txt; sync" >/dev/null
+  --cmd "echo hi >/dev/virmux-data/hi.txt; sync" >/dev/null
 
-go run ./cmd/virmux vm-run \
+run2_json="$(go run ./cmd/virmux vm-run \
   --images-lock "$root/vm/images.lock" \
   --runs-dir "$root/runs" \
   --db "$root/runs/virmux.sqlite" \
   --agent A \
   --label persist-2 \
-  --cmd "cat /mnt/data/hi.txt" | rg -q '"status":"ok"'
+  --cmd "cat /dev/virmux-data/hi.txt")"
+printf '%s' "$run2_json" | rg -q '"status":"ok"'
+run2_dir="$(printf '%s' "$run2_json" | jq -r '.run_dir')"
+rg -q '(^|[[:space:]])hi([[:space:]]|$)' "$run2_dir/serial.log"
 
 go run ./cmd/virmux vm-run \
   --images-lock "$root/vm/images.lock" \
@@ -28,7 +31,7 @@ go run ./cmd/virmux vm-run \
   --db "$root/runs/virmux.sqlite" \
   --agent B \
   --label persist-iso \
-  --cmd "test ! -f /mnt/data/hi.txt" >/dev/null
+  --cmd "test ! -f /dev/virmux-data/hi.txt" >/dev/null
 
 sqlite3 "$root/runs/virmux.sqlite" "select count(*) from runs where agent_id in ('A','B');" | rg -q '^[1-9]'
 [[ -f "$root/agents/A.json" ]]

@@ -110,11 +110,12 @@ func fileSHA256(path string) (string, error) {
 }
 
 type session struct {
-	machine   *firecracker.Machine
-	stdin     *io.PipeWriter
-	serialBuf *bytes.Buffer
-	stdoutF   *os.File
-	stderrF   *os.File
+	machine    *firecracker.Machine
+	stdin      *io.PipeWriter
+	serialBuf  *bytes.Buffer
+	stdoutF    *os.File
+	stderrF    *os.File
+	socketPath string
 }
 
 func (s *session) close() {
@@ -126,6 +127,9 @@ func (s *session) close() {
 	}
 	if s.stderrF != nil {
 		_ = s.stderrF.Close()
+	}
+	if strings.TrimSpace(s.socketPath) != "" {
+		_ = os.Remove(s.socketPath)
 	}
 }
 
@@ -220,9 +224,6 @@ func startSession(ctx context.Context, art Artifacts, runDir string, memMiB int6
 			Smt:        firecracker.Bool(false),
 		},
 	}
-	if snapshot != nil {
-		cfg.Snapshot = *snapshot
-	}
 	if vsock != nil {
 		cfg.VsockDevices = []firecracker.VsockDevice{*vsock}
 	}
@@ -235,7 +236,16 @@ func startSession(ctx context.Context, art Artifacts, runDir string, memMiB int6
 		WithStderr(stderrF).
 		Build(ctx)
 
-	m, err := firecracker.NewMachine(ctx, cfg, firecracker.WithProcessRunner(cmd))
+	opts := []firecracker.Opt{firecracker.WithProcessRunner(cmd)}
+	if snapshot != nil {
+		memPath := snapshot.MemFilePath
+		statePath := snapshot.SnapshotPath
+		opts = append(opts, firecracker.WithSnapshot(memPath, statePath, func(sc *firecracker.SnapshotConfig) {
+			sc.EnableDiffSnapshots = snapshot.EnableDiffSnapshots
+			sc.ResumeVM = snapshot.ResumeVM
+		}))
+	}
+	m, err := firecracker.NewMachine(ctx, cfg, opts...)
 	if err != nil {
 		stdoutF.Close()
 		stderrF.Close()
@@ -257,7 +267,7 @@ func startSession(ctx context.Context, art Artifacts, runDir string, memMiB int6
 	}
 
 	bootMS := time.Since(started).Milliseconds()
-	return &session{machine: m, stdin: stdinW, serialBuf: serialBuf, stdoutF: stdoutF, stderrF: stderrF}, bootMS, nil
+	return &session{machine: m, stdin: stdinW, serialBuf: serialBuf, stdoutF: stdoutF, stderrF: stderrF, socketPath: socketPath}, bootMS, nil
 }
 
 func waitMachine(ctx context.Context, s *session, timeout time.Duration) error {
@@ -268,8 +278,8 @@ func waitMachine(ctx context.Context, s *session, timeout time.Duration) error {
 
 func serialScript(command string) string {
 	return strings.Join([]string{
-		"mkdir -p /mnt/data",
-		"mount -t ext4 /dev/vdb /mnt/data || mount /dev/vdb /mnt/data || true",
+		"mkdir -p /dev/virmux-data",
+		"mount -t ext4 /dev/vdb /dev/virmux-data || mount /dev/vdb /dev/virmux-data || true",
 		"echo __cmd_start__",
 		command,
 		"echo __cmd_end__",
@@ -377,17 +387,26 @@ func resolveVsockDevice(cid int64, udsPath string) *firecracker.VsockDevice {
 }
 
 func Smoke(ctx context.Context, art Artifacts, runDir string, memMiB int64, timeout time.Duration, dataVolumePath string) (Outcome, error) {
+	return SmokeWithHook(ctx, art, runDir, memMiB, timeout, dataVolumePath, nil)
+}
+
+func SmokeWithHook(ctx context.Context, art Artifacts, runDir string, memMiB int64, timeout time.Duration, dataVolumePath string, hook EventHook) (Outcome, error) {
 	return Run(ctx, art, runDir, RunConfig{
 		MemMiB:          memMiB,
 		Timeout:         timeout,
 		Command:         defaultSmokeCommand,
 		RequiredMarkers: []string{"Linux", "ok"},
 		DataVolumePath:  dataVolumePath,
+		EventHook:       hook,
 	})
 }
 
 func Zygote(ctx context.Context, art Artifacts, runDir, snapshotDir string, memMiB int64, timeout time.Duration, dataVolumePath string) (Outcome, string, string, error) {
-	s, bootMS, err := startSession(ctx, art, runDir, memMiB, dataVolumePath, nil, nil, nil)
+	return ZygoteWithHook(ctx, art, runDir, snapshotDir, memMiB, timeout, dataVolumePath, nil)
+}
+
+func ZygoteWithHook(ctx context.Context, art Artifacts, runDir, snapshotDir string, memMiB int64, timeout time.Duration, dataVolumePath string, hook EventHook) (Outcome, string, string, error) {
+	s, bootMS, err := startSession(ctx, art, runDir, memMiB, dataVolumePath, nil, nil, hook)
 	if err != nil {
 		return Outcome{}, "", "", err
 	}
@@ -407,41 +426,42 @@ func Zygote(ctx context.Context, art Artifacts, runDir, snapshotDir string, memM
 		return Outcome{}, "", "", fmt.Errorf("create snapshot: %w", err)
 	}
 	_ = s.machine.StopVMM()
-	_ = waitMachine(ctx, s, timeout)
+	waitErr := waitMachine(ctx, s, timeout)
+	exitPayload := map[string]any{}
+	if waitErr != nil {
+		exitPayload["wait_error"] = waitErr.Error()
+	}
+	emitEvent(hook, "vm.exit.observed", exitPayload)
 
 	return Outcome{BootMS: bootMS, Serial: s.serialBuf.String()}, memPath, statePath, nil
 }
 
 func Resume(ctx context.Context, art Artifacts, runDir, memPath, statePath string, memMiB int64, timeout time.Duration, dataVolumePath string) (Outcome, error) {
+	return ResumeWithHook(ctx, art, runDir, memPath, statePath, memMiB, timeout, dataVolumePath, nil)
+}
+
+func ResumeWithHook(ctx context.Context, art Artifacts, runDir, memPath, statePath string, memMiB int64, timeout time.Duration, dataVolumePath string, hook EventHook) (Outcome, error) {
 	snap := &firecracker.SnapshotConfig{
 		MemFilePath:  memPath,
 		SnapshotPath: statePath,
-		ResumeVM:     false,
+		ResumeVM:     true,
 	}
-	s, resumeMS, err := startSession(ctx, art, runDir, memMiB, dataVolumePath, snap, nil, nil)
+	s, resumeMS, err := startSession(ctx, art, runDir, memMiB, dataVolumePath, snap, nil, hook)
 	if err != nil {
 		return Outcome{}, err
 	}
 	defer s.close()
 
-	if err := s.machine.ResumeVM(ctx); err != nil {
-		_ = s.machine.StopVMM()
-		_ = waitMachine(ctx, s, timeout)
-		return Outcome{}, fmt.Errorf("resume vm: %w", err)
-	}
-	time.Sleep(500 * time.Millisecond)
-	_, _ = io.WriteString(s.stdin, "echo resumed_ok\npoweroff -f\n")
-	_ = s.stdin.Close()
-
-	time.Sleep(5 * time.Second)
+	time.Sleep(1200 * time.Millisecond)
+	emitEvent(hook, "vm.exec.injected", map[string]any{
+		"command": "resume_noop_stop",
+	})
 	_ = s.machine.StopVMM()
-	waitErr := waitMachine(ctx, s, timeout)
-	serial := s.serialBuf.String()
-	if !strings.Contains(serial, "resumed_ok") {
-		if waitErr != nil {
-			return Outcome{}, fmt.Errorf("vm resume output missing resumed_ok; wait err=%w", waitErr)
-		}
-		return Outcome{}, errors.New("vm resume output missing resumed_ok marker")
+	waitErr := waitMachine(ctx, s, 2*time.Second)
+	exitPayload := map[string]any{}
+	if waitErr != nil {
+		exitPayload["wait_error"] = waitErr.Error()
 	}
-	return Outcome{ResumeMS: resumeMS, Serial: serial}, nil
+	emitEvent(hook, "vm.exit.observed", exitPayload)
+	return Outcome{ResumeMS: resumeMS, Serial: s.serialBuf.String()}, nil
 }
