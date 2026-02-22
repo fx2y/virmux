@@ -56,12 +56,33 @@ func TestStoreSchemaAndFK(t *testing.T) {
 	if err := s.InsertArtifact(ctx, "missing", "x", "y", 1); err == nil {
 		t.Fatalf("expected fk error for missing run in artifacts")
 	}
+	if err := s.InsertToolCall(ctx, ToolCall{
+		RunID:      run.ID,
+		Seq:        1,
+		ReqID:      1,
+		Tool:       "shell.exec",
+		InputHash:  "sha256:in",
+		OutputHash: "sha256:out",
+		StdoutRef:  "artifacts/1.out",
+		StderrRef:  "artifacts/1.err",
+	}); err != nil {
+		t.Fatalf("insert tool call: %v", err)
+	}
+	if err := s.InsertToolCall(ctx, ToolCall{RunID: "missing", Seq: 1, Tool: "shell.exec", InputHash: "x", OutputHash: "y"}); err == nil {
+		t.Fatalf("expected fk error for missing run in tool_calls")
+	}
 	var idxCount int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_artifacts_run_id'`).Scan(&idxCount); err != nil {
 		t.Fatalf("query artifacts index: %v", err)
 	}
 	if idxCount != 1 {
 		t.Fatalf("expected idx_artifacts_run_id, got %d", idxCount)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_tool_calls_run_seq'`).Scan(&idxCount); err != nil {
+		t.Fatalf("query tool_calls index: %v", err)
+	}
+	if idxCount != 1 {
+		t.Fatalf("expected idx_tool_calls_run_seq, got %d", idxCount)
 	}
 }
 
@@ -95,13 +116,22 @@ CREATE TABLE runs (
 	}
 	defer s.Close()
 
-	for _, col := range []string{"agent_id", "kernel_sha", "rootfs_sha", "snapshot_id", "cost_est"} {
+	for _, col := range []string{"agent_id", "kernel_sha", "rootfs_sha", "snapshot_id", "cost_est", "source_bundle"} {
 		var n int
 		if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name=?`, col).Scan(&n); err != nil {
 			t.Fatalf("query column %s: %v", col, err)
 		}
 		if n != 1 {
 			t.Fatalf("missing migrated column %s", col)
+		}
+	}
+	for _, tbl := range []string{"tool_calls"} {
+		var n int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, tbl).Scan(&n); err != nil {
+			t.Fatalf("query table %s: %v", tbl, err)
+		}
+		if n != 1 {
+			t.Fatalf("missing migrated table %s", tbl)
 		}
 	}
 }

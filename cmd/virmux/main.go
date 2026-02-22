@@ -81,7 +81,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: virmux <vm-run|vm-smoke|vm-zygote|vm-resume|slack-server>")
+		return errors.New("usage: virmux <vm-run|vm-smoke|vm-zygote|vm-resume|export|import|slack-server>")
 	}
 	switch args[0] {
 	case "vm-run":
@@ -92,6 +92,10 @@ func run(args []string) error {
 		return cmdVMZygote(args[1:])
 	case "vm-resume":
 		return cmdVMResume(args[1:])
+	case "export":
+		return cmdExport(args[1:])
+	case "import":
+		return cmdImport(args[1:])
 	case "slack-server":
 		return cmdSlackServer(args[1:])
 	default:
@@ -217,8 +221,13 @@ func runAgentdTool(ctx context.Context, vsockPath string, cfg *runCommon, comman
 	if err != nil {
 		return err
 	}
-	data, _ := json.Marshal(res)
-	return emitVM("vm.tool.result", map[string]any{"req": 1, "tool": cfg.tool, "result": string(data), "connect_attempts": dialRes.Stats.Attempts, "handshake_ms": dialRes.Stats.HandshakeMS})
+	payload, err := buildToolResultPayload(runDir, req, res)
+	if err != nil {
+		return err
+	}
+	payload["connect_attempts"] = dialRes.Stats.Attempts
+	payload["handshake_ms"] = dialRes.Stats.HandshakeMS
+	return emitVM("vm.tool.result", payload)
 }
 
 type bridgeDialResult struct {
@@ -672,8 +681,25 @@ func stringDetail(m map[string]any, key string) string {
 }
 
 func persistRunArtifacts(ctx context.Context, st *store.Store, runID string, paths []string) error {
+	seen := map[string]struct{}{}
 	for _, p := range paths {
 		if strings.TrimSpace(p) == "" {
+			continue
+		}
+		seen[p] = struct{}{}
+		sum, size, include, err := collectArtifactRecord(p)
+		if err != nil {
+			return err
+		}
+		if !include {
+			continue
+		}
+		if err := st.InsertArtifact(ctx, runID, p, sum, size); err != nil {
+			return err
+		}
+	}
+	for _, p := range extraRunArtifactPaths(paths) {
+		if _, ok := seen[p]; ok {
 			continue
 		}
 		sum, size, include, err := collectArtifactRecord(p)
@@ -741,6 +767,31 @@ func emit(ctx context.Context, st *store.Store, tw *trace.Writer, runID, task, e
 	data, _ := json.Marshal(payload)
 	if err := st.InsertEvent(ctx, runID, event, string(data), now().UTC()); err != nil {
 		return err
+	}
+	if receipt, ok := trace.ExtractToolReceipt(event, payload); ok {
+		seq := receipt.Seq
+		if seq <= 0 {
+			seq = 1
+		}
+		if err := st.InsertToolCall(ctx, store.ToolCall{
+			RunID:      runID,
+			Seq:        seq,
+			ReqID:      receipt.ReqID,
+			Tool:       receipt.Tool,
+			InputHash:  receipt.InputHash,
+			OutputHash: receipt.OutputHash,
+			InputRef:   receipt.InputRef,
+			OutputRef:  receipt.OutputRef,
+			StdoutRef:  receipt.StdoutRef,
+			StderrRef:  receipt.StderrRef,
+			RC:         receipt.RC,
+			DurMS:      receipt.DurMS,
+			BytesIn:    receipt.BytesIn,
+			BytesOut:   receipt.BytesOut,
+			ErrorCode:  receipt.ErrorCode,
+		}); err != nil {
+			return err
+		}
 	}
 	return nil
 }

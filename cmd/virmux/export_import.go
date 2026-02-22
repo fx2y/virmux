@@ -1,0 +1,666 @@
+package main
+
+import (
+	"archive/tar"
+	"bytes"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/haris/virmux/internal/store"
+	"github.com/haris/virmux/internal/trace"
+)
+
+type exportManifestEntry struct {
+	Path   string `json:"path"`
+	Kind   string `json:"kind"`
+	SHA256 string `json:"sha256"`
+	Bytes  int64  `json:"bytes"`
+	Link   string `json:"link,omitempty"`
+}
+
+type exportBundleMeta struct {
+	Version int    `json:"version"`
+	RunID   string `json:"run_id"`
+	Task    string `json:"task"`
+}
+
+func cmdExport(args []string) error {
+	fs := flagSet("export")
+	runID := fs.String("run-id", "", "run id to export")
+	dbPath := fs.String("db", "runs/virmux.sqlite", "sqlite db path")
+	runsDir := fs.String("runs-dir", "runs", "runs directory")
+	outPath := fs.String("out", "", "output bundle path (.tar.zst)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*runID) == "" {
+		return errors.New("--run-id required")
+	}
+	out := *outPath
+	if out == "" {
+		out = filepath.Join(*runsDir, *runID+".tar.zst")
+	}
+	return exportRunBundle(context.Background(), *dbPath, *runsDir, *runID, out)
+}
+
+func cmdImport(args []string) error {
+	fs := flagSet("import")
+	bundle := fs.String("bundle", "", "bundle path (.tar.zst)")
+	dbPath := fs.String("db", "runs/virmux.sqlite", "sqlite db path")
+	runsDir := fs.String("runs-dir", "runs", "runs directory")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*bundle) == "" {
+		return errors.New("--bundle required")
+	}
+	return importRunBundle(context.Background(), *bundle, *dbPath, *runsDir)
+}
+
+func flagSet(name string) *flag.FlagSet {
+	return flag.NewFlagSet(name, flag.ContinueOnError)
+}
+
+func exportRunBundle(ctx context.Context, dbPath, runsDir, runID, outPath string) error {
+	st, err := store.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	db := st.DB()
+	runDir := filepath.Join(runsDir, runID)
+	info, err := os.Stat(runDir)
+	if err != nil {
+		return fmt.Errorf("stat run dir: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("run dir not directory: %s", runDir)
+	}
+
+	task, err := queryRunTask(db, runID)
+	if err != nil {
+		return err
+	}
+
+	tmpDir, err := os.MkdirTemp("", "virmux-export-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+	stage := filepath.Join(tmpDir, "bundle")
+	if err := os.MkdirAll(stage, 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(stage, "db"), 0o755); err != nil {
+		return err
+	}
+	if err := copyTree(runDir, filepath.Join(stage, "run")); err != nil {
+		return err
+	}
+	if err := writeRunSnapshots(db, runID, filepath.Join(stage, "db")); err != nil {
+		return err
+	}
+	meta := exportBundleMeta{Version: 1, RunID: runID, Task: task}
+	if err := writeJSONFile(filepath.Join(stage, "meta.json"), meta); err != nil {
+		return err
+	}
+	manifest, err := buildManifest(stage)
+	if err != nil {
+		return err
+	}
+	if err := writeJSONFile(filepath.Join(stage, "manifest.json"), manifest); err != nil {
+		return err
+	}
+
+	tarPath := filepath.Join(tmpDir, "bundle.tar")
+	if err := writeDeterministicTar(stage, tarPath); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+		return err
+	}
+	if err := compressZstd(tarPath, outPath); err != nil {
+		return err
+	}
+	return nil
+}
+
+func importRunBundle(ctx context.Context, bundlePath, dbPath, runsDir string) error {
+	_ = ctx
+	tmpDir, err := os.MkdirTemp("", "virmux-import-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+	stage := filepath.Join(tmpDir, "bundle")
+	if err := os.MkdirAll(stage, 0o755); err != nil {
+		return err
+	}
+	if err := extractZstdTar(bundlePath, stage); err != nil {
+		return err
+	}
+	if err := verifyManifest(stage); err != nil {
+		return err
+	}
+	var meta exportBundleMeta
+	if err := readJSONFile(filepath.Join(stage, "meta.json"), &meta); err != nil {
+		return err
+	}
+	destRunDir := filepath.Join(runsDir, meta.RunID)
+	if _, err := os.Lstat(destRunDir); err == nil {
+		return fmt.Errorf("run dir already exists: %s", destRunDir)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	st, err := store.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	if err := importSnapshotsIntoStore(st.DB(), stage, bundlePath); err != nil {
+		return err
+	}
+	if err := copyTree(filepath.Join(stage, "run"), destRunDir); err != nil {
+		return err
+	}
+	return nil
+}
+
+func queryRunTask(db *sql.DB, runID string) (string, error) {
+	var task string
+	if err := db.QueryRow(`SELECT task FROM runs WHERE id=?`, runID).Scan(&task); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", fmt.Errorf("run not found: %s", runID)
+		}
+		return "", err
+	}
+	return task, nil
+}
+
+func writeRunSnapshots(db *sql.DB, runID, outDir string) error {
+	if err := snapshotRows(db, filepath.Join(outDir, "runs.json"),
+		`SELECT id,task,label,agent_id,image_sha,kernel_sha,rootfs_sha,snapshot_id,cost_est,status,started_at,ended_at,boot_ms,resume_ms,trace_path,source_bundle FROM runs WHERE id=? ORDER BY id`,
+		runID); err != nil {
+		return err
+	}
+	if err := snapshotRows(db, filepath.Join(outDir, "events.json"),
+		`SELECT run_id,ts,kind,payload FROM events WHERE run_id=? ORDER BY id`,
+		runID); err != nil {
+		return err
+	}
+	if err := snapshotRows(db, filepath.Join(outDir, "artifacts.json"),
+		`SELECT run_id,path,sha256,bytes FROM artifacts WHERE run_id=? ORDER BY id`,
+		runID); err != nil {
+		return err
+	}
+	if err := snapshotRows(db, filepath.Join(outDir, "tool_calls.json"),
+		`SELECT run_id,seq,req_id,tool,input_hash,output_hash,input_ref,output_ref,stdout_ref,stderr_ref,rc,dur_ms,bytes_in,bytes_out,error_code FROM tool_calls WHERE run_id=? ORDER BY seq,id`,
+		runID); err != nil {
+		return err
+	}
+	return nil
+}
+
+func snapshotRows(db *sql.DB, outPath, q string, args ...any) error {
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return err
+	}
+	var all []map[string]any
+	for rows.Next() {
+		dest := make([]any, len(cols))
+		holders := make([]any, len(cols))
+		for i := range holders {
+			holders[i] = &dest[i]
+		}
+		if err := rows.Scan(holders...); err != nil {
+			return err
+		}
+		m := make(map[string]any, len(cols))
+		for i, c := range cols {
+			switch v := dest[i].(type) {
+			case []byte:
+				m[c] = string(v)
+			default:
+				m[c] = v
+			}
+		}
+		all = append(all, m)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return writeJSONFile(outPath, all)
+}
+
+func writeJSONFile(path string, v any) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(b, '\n'), 0o644)
+}
+
+func readJSONFile(path string, v any) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, v)
+}
+
+func buildManifest(stage string) ([]exportManifestEntry, error) {
+	var entries []exportManifestEntry
+	err := filepath.Walk(stage, func(path string, info fs.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(stage, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." || rel == "manifest.json" {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		mode := info.Mode()
+		switch {
+		case mode&os.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			entries = append(entries, exportManifestEntry{Path: rel, Kind: "symlink", SHA256: "meta:symlink", Link: target})
+		case mode.IsDir():
+			entries = append(entries, exportManifestEntry{Path: rel, Kind: "dir", SHA256: "meta:dir"})
+		case mode.IsRegular():
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			entries = append(entries, exportManifestEntry{Path: rel, Kind: "file", SHA256: trace.SHA256Hex(b), Bytes: info.Size()})
+		default:
+			entries = append(entries, exportManifestEntry{Path: rel, Kind: "other", SHA256: fmt.Sprintf("meta:mode:%#o", uint32(mode.Type()))})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
+	return entries, nil
+}
+
+func writeDeterministicTar(stageDir, tarPath string) error {
+	out, err := os.Create(tarPath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	tw := tar.NewWriter(out)
+	defer tw.Close()
+
+	var paths []string
+	if err := filepath.Walk(stageDir, func(path string, info fs.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == stageDir {
+			return nil
+		}
+		paths = append(paths, path)
+		return nil
+	}); err != nil {
+		return err
+	}
+	sort.Strings(paths)
+
+	epoch := time.Unix(0, 0).UTC()
+	for _, path := range paths {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(stageDir, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		hdr, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		hdr.Name = rel
+		hdr.Uid, hdr.Gid = 0, 0
+		hdr.Uname, hdr.Gname = "", ""
+		hdr.ModTime = epoch
+		hdr.AccessTime = epoch
+		hdr.ChangeTime = epoch
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			hdr.Linkname = target
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		if info.Mode().IsRegular() {
+			f, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(tw, f); err != nil {
+				_ = f.Close()
+				return err
+			}
+			_ = f.Close()
+		}
+	}
+	return nil
+}
+
+func compressZstd(tarPath, outPath string) error {
+	cmd := exec.Command("zstd", "-q", "-f", "-19", tarPath, "-o", outPath)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("zstd compress: %w", err)
+	}
+	return nil
+}
+
+func extractZstdTar(bundlePath, dest string) error {
+	cmd := exec.Command("zstd", "-dc", bundlePath)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	tr := tar.NewReader(stdout)
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			_ = cmd.Wait()
+			return err
+		}
+		target, err := safeJoin(dest, hdr.Name)
+		if err != nil {
+			_ = cmd.Wait()
+			return err
+		}
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				_ = cmd.Wait()
+				return err
+			}
+		case tar.TypeReg, tar.TypeRegA:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				_ = cmd.Wait()
+				return err
+			}
+			f, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, fs.FileMode(hdr.Mode))
+			if err != nil {
+				_ = cmd.Wait()
+				return err
+			}
+			if _, err := io.Copy(f, tr); err != nil {
+				_ = f.Close()
+				_ = cmd.Wait()
+				return err
+			}
+			_ = f.Close()
+		case tar.TypeSymlink:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				_ = cmd.Wait()
+				return err
+			}
+			if err := os.Symlink(hdr.Linkname, target); err != nil {
+				_ = cmd.Wait()
+				return err
+			}
+		default:
+			_ = cmd.Wait()
+			return fmt.Errorf("unsupported tar entry type %d for %s", hdr.Typeflag, hdr.Name)
+		}
+	}
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("zstd extract: %w", err)
+	}
+	return nil
+}
+
+func safeJoin(root, name string) (string, error) {
+	clean := filepath.Clean(name)
+	if clean == "." {
+		return root, nil
+	}
+	if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
+		return "", fmt.Errorf("unsafe bundle path: %s", name)
+	}
+	return filepath.Join(root, clean), nil
+}
+
+func verifyManifest(stage string) error {
+	var manifest []exportManifestEntry
+	if err := readJSONFile(filepath.Join(stage, "manifest.json"), &manifest); err != nil {
+		return err
+	}
+	actual, err := buildManifest(stage)
+	if err != nil {
+		return err
+	}
+	got, _ := json.Marshal(actual)
+	want, _ := json.Marshal(manifest)
+	if !bytes.Equal(got, want) {
+		return fmt.Errorf("bundle manifest mismatch")
+	}
+	return nil
+}
+
+func importSnapshotsIntoStore(db *sql.DB, stage, bundlePath string) error {
+	var runsRows []map[string]any
+	var eventRows []map[string]any
+	var artRows []map[string]any
+	var toolRows []map[string]any
+	if err := readJSONFile(filepath.Join(stage, "db", "runs.json"), &runsRows); err != nil {
+		return err
+	}
+	if err := readJSONFile(filepath.Join(stage, "db", "events.json"), &eventRows); err != nil {
+		return err
+	}
+	if err := readJSONFile(filepath.Join(stage, "db", "artifacts.json"), &artRows); err != nil {
+		return err
+	}
+	if err := readJSONFile(filepath.Join(stage, "db", "tool_calls.json"), &toolRows); err != nil {
+		return err
+	}
+	if len(runsRows) != 1 {
+		return fmt.Errorf("bundle runs.json must contain exactly 1 row")
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	r := runsRows[0]
+	if _, err := tx.Exec(`INSERT INTO runs(id,task,label,agent_id,image_sha,kernel_sha,rootfs_sha,snapshot_id,cost_est,status,started_at,ended_at,boot_ms,resume_ms,trace_path,source_bundle)
+	VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		str(r["id"]),
+		str(r["task"]),
+		str(r["label"]),
+		str(r["agent_id"]),
+		str(r["image_sha"]),
+		str(r["kernel_sha"]),
+		str(r["rootfs_sha"]),
+		str(r["snapshot_id"]),
+		numf(r["cost_est"]),
+		str(r["status"]),
+		str(r["started_at"]),
+		nilIfEmpty(str(r["ended_at"])),
+		numi(r["boot_ms"]),
+		numi(r["resume_ms"]),
+		str(r["trace_path"]),
+		bundlePath,
+	); err != nil {
+		return fmt.Errorf("insert imported run: %w", err)
+	}
+	for _, row := range eventRows {
+		if _, err := tx.Exec(`INSERT INTO events(run_id,ts,kind,payload) VALUES(?,?,?,?)`,
+			str(row["run_id"]), str(row["ts"]), str(row["kind"]), str(row["payload"])); err != nil {
+			return fmt.Errorf("insert imported event: %w", err)
+		}
+	}
+	for _, row := range artRows {
+		if _, err := tx.Exec(`INSERT INTO artifacts(run_id,path,sha256,bytes) VALUES(?,?,?,?)`,
+			str(row["run_id"]), str(row["path"]), str(row["sha256"]), numi(row["bytes"])); err != nil {
+			return fmt.Errorf("insert imported artifact: %w", err)
+		}
+	}
+	for _, row := range toolRows {
+		if _, err := tx.Exec(`INSERT INTO tool_calls(run_id,seq,req_id,tool,input_hash,output_hash,input_ref,output_ref,stdout_ref,stderr_ref,rc,dur_ms,bytes_in,bytes_out,error_code)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			str(row["run_id"]), numi(row["seq"]), numi(row["req_id"]), str(row["tool"]), str(row["input_hash"]), str(row["output_hash"]),
+			str(row["input_ref"]), str(row["output_ref"]), str(row["stdout_ref"]), str(row["stderr_ref"]),
+			numi(row["rc"]), numi(row["dur_ms"]), numi(row["bytes_in"]), numi(row["bytes_out"]), str(row["error_code"])); err != nil {
+			return fmt.Errorf("insert imported tool_call: %w", err)
+		}
+	}
+	return tx.Commit()
+}
+
+func copyTree(src, dst string) error {
+	return filepath.Walk(src, func(path string, info fs.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := dst
+		if rel != "." {
+			target = filepath.Join(dst, rel)
+		}
+		mode := info.Mode()
+		switch {
+		case rel == ".":
+			return os.MkdirAll(dst, 0o755)
+		case mode&os.ModeSymlink != 0:
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			return os.Symlink(link, target)
+		case mode.IsDir():
+			return os.MkdirAll(target, mode.Perm())
+		case mode.IsRegular():
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			in, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			defer in.Close()
+			out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode.Perm())
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(out, in); err != nil {
+				_ = out.Close()
+				return err
+			}
+			return out.Close()
+		default:
+			return nil
+		}
+	})
+}
+
+func str(v any) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case nil:
+		return ""
+	default:
+		return fmt.Sprint(x)
+	}
+}
+
+func numi(v any) int64 {
+	switch x := v.(type) {
+	case float64:
+		return int64(x)
+	case int64:
+		return x
+	case int:
+		return int64(x)
+	case json.Number:
+		n, _ := x.Int64()
+		return n
+	case nil:
+		return 0
+	default:
+		var n int64
+		fmt.Sscan(fmt.Sprint(x), &n)
+		return n
+	}
+}
+
+func numf(v any) float64 {
+	switch x := v.(type) {
+	case float64:
+		return x
+	case json.Number:
+		n, _ := x.Float64()
+		return n
+	case nil:
+		return 0
+	default:
+		var n float64
+		fmt.Sscan(fmt.Sprint(x), &n)
+		return n
+	}
+}
+
+func nilIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}

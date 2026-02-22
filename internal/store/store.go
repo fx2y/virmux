@@ -29,6 +29,24 @@ type Store struct {
 	db *sql.DB
 }
 
+type ToolCall struct {
+	RunID      string
+	Seq        int64
+	ReqID      int64
+	Tool       string
+	InputHash  string
+	OutputHash string
+	InputRef   string
+	OutputRef  string
+	StdoutRef  string
+	StderrRef  string
+	RC         int
+	DurMS      int64
+	BytesIn    int64
+	BytesOut   int64
+	ErrorCode  string
+}
+
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create db dir: %w", err)
@@ -73,7 +91,8 @@ CREATE TABLE IF NOT EXISTS runs (
   ended_at TEXT,
   boot_ms INTEGER NOT NULL DEFAULT 0,
   resume_ms INTEGER NOT NULL DEFAULT 0,
-  trace_path TEXT NOT NULL DEFAULT ''
+  trace_path TEXT NOT NULL DEFAULT '',
+  source_bundle TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,9 +116,30 @@ CREATE TABLE IF NOT EXISTS artifacts (
   bytes INTEGER NOT NULL DEFAULT 0,
   FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS tool_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  req_id INTEGER NOT NULL DEFAULT 0,
+  tool TEXT NOT NULL,
+  input_hash TEXT NOT NULL,
+  output_hash TEXT NOT NULL,
+  input_ref TEXT NOT NULL DEFAULT '',
+  output_ref TEXT NOT NULL DEFAULT '',
+  stdout_ref TEXT NOT NULL DEFAULT '',
+  stderr_ref TEXT NOT NULL DEFAULT '',
+  rc INTEGER NOT NULL DEFAULT 0,
+  dur_ms INTEGER NOT NULL DEFAULT 0,
+  bytes_in INTEGER NOT NULL DEFAULT 0,
+  bytes_out INTEGER NOT NULL DEFAULT 0,
+  error_code TEXT NOT NULL DEFAULT '',
+  FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+);
 CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id);
 CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at);
 CREATE INDEX IF NOT EXISTS idx_artifacts_run_id ON artifacts(run_id);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_run_seq ON tool_calls(run_id,seq);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_tool_input_hash ON tool_calls(tool,input_hash);
 `
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("ensure schema: %w", err)
@@ -118,6 +158,9 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_run_id ON artifacts(run_id);
 	}
 	if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN cost_est REAL NOT NULL DEFAULT 0`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("ensure runs.cost_est: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN source_bundle TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("ensure runs.source_bundle: %w", err)
 	}
 	return nil
 }
@@ -192,6 +235,35 @@ func (s *Store) InsertEvent(ctx context.Context, runID, kind, payload string, ts
 	}
 	return nil
 }
+
+func (s *Store) InsertToolCall(ctx context.Context, tc ToolCall) error {
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO tool_calls(run_id,seq,req_id,tool,input_hash,output_hash,input_ref,output_ref,stdout_ref,stderr_ref,rc,dur_ms,bytes_in,bytes_out,error_code)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		tc.RunID,
+		tc.Seq,
+		tc.ReqID,
+		tc.Tool,
+		tc.InputHash,
+		tc.OutputHash,
+		tc.InputRef,
+		tc.OutputRef,
+		tc.StdoutRef,
+		tc.StderrRef,
+		tc.RC,
+		tc.DurMS,
+		tc.BytesIn,
+		tc.BytesOut,
+		tc.ErrorCode,
+	)
+	if err != nil {
+		return fmt.Errorf("insert tool_call: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) DB() *sql.DB { return s.db }
 
 func (s *Store) InsertSlackEvent(ctx context.Context, eventType, payload string, ts time.Time) error {
 	_, err := s.db.ExecContext(
