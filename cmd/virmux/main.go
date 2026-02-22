@@ -211,7 +211,7 @@ func runAgentdTool(ctx context.Context, vsockPath string, cfg *runCommon, comman
 	if err != nil {
 		return transportStats{Attempts: dialRes.Stats.Attempts, HandshakeMS: dialRes.Stats.HandshakeMS}, err
 	}
-	if err := emitVM("vm.guest.ready", map[string]any{"latency_ms": time.Since(started).Milliseconds(), "method": "vsock_ready_banner", "caps": caps}); err != nil {
+	if err := emitVM("vm.agent.ready", map[string]any{"latency_ms": time.Since(started).Milliseconds(), "method": "vsock_ready_banner", "caps": caps}); err != nil {
 		return transportStats{Attempts: dialRes.Stats.Attempts, HandshakeMS: dialRes.Stats.HandshakeMS}, err
 	}
 	rw := struct {
@@ -255,7 +255,27 @@ func runAgentdTool(ctx context.Context, vsockPath string, cfg *runCommon, comman
 	if err := emitVM("vm.tool.result", payload); err != nil {
 		return transportStats{Attempts: dialRes.Stats.Attempts, HandshakeMS: dialRes.Stats.HandshakeMS}, err
 	}
+	if err := bridgeToolResultError(req.Tool, res); err != nil {
+		return transportStats{Attempts: dialRes.Stats.Attempts, HandshakeMS: dialRes.Stats.HandshakeMS}, err
+	}
 	return transportStats{Attempts: dialRes.Stats.Attempts, HandshakeMS: dialRes.Stats.HandshakeMS}, nil
+}
+
+func bridgeToolResultError(tool string, res trpc.Response) error {
+	if res.OK {
+		return nil
+	}
+	code := "INTERNAL"
+	msg := "tool returned ok=false"
+	if res.Error != nil {
+		if v, _ := res.Error["code"].(string); strings.TrimSpace(v) != "" {
+			code = strings.TrimSpace(v)
+		}
+		if v, _ := res.Error["msg"].(string); strings.TrimSpace(v) != "" {
+			msg = strings.TrimSpace(v)
+		}
+	}
+	return fmt.Errorf("tool %s failed code=%s msg=%s", tool, code, msg)
 }
 
 func hydrateLegacyToolStreams(ctx context.Context, client *trpc.Client, req trpc.Request, res *trpc.Response) error {

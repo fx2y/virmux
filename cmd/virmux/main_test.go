@@ -332,6 +332,33 @@ func TestClassifyRunFailure(t *testing.T) {
 	}
 }
 
+func TestBridgeToolResultError(t *testing.T) {
+	t.Parallel()
+	if err := bridgeToolResultError("fs.read", trpc.Response{OK: true}); err != nil {
+		t.Fatalf("ok response should not return error: %v", err)
+	}
+	denied := bridgeToolResultError("fs.read", trpc.Response{
+		OK:    false,
+		Error: map[string]any{"code": "DENIED", "msg": "path /etc denied"},
+	})
+	if denied == nil {
+		t.Fatalf("expected denied error")
+	}
+	if got := classifyRunFailure(denied).Code; got != "DENIED" {
+		t.Fatalf("expected DENIED classification, got %s", got)
+	}
+	timeout := bridgeToolResultError("shell.exec", trpc.Response{
+		OK:    false,
+		Error: map[string]any{"code": "TIMEOUT", "msg": "command timeout"},
+	})
+	if timeout == nil {
+		t.Fatalf("expected timeout error")
+	}
+	if got := classifyRunFailure(timeout).Code; got != "TIMEOUT" {
+		t.Fatalf("expected TIMEOUT classification, got %s", got)
+	}
+}
+
 func TestMaybeAutoExportFailureEmitsPartialEventAndArtifact(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()

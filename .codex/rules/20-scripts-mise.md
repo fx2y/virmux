@@ -7,26 +7,33 @@ paths:
 ---
 # Script + DAG Rules
 - Bash scripts require `#!/usr/bin/env bash` and `set -euo pipefail`.
-- Reuse `scripts/common.sh`; do not duplicate repo-root/hash/lock helpers.
-- `doctor` is a hard preflight gate:
-- bootstrap-safe task graph (must run on cold clone)
-- explicit FAIL lines with direct remediation
-- must tolerate built-in KVM via `/sys/module/kvm`
-- must validate lock-selected artifact triplet + executable firecracker + AF_UNIX bind/unlink viability
-- Runtime-critical wrappers (`vm_smoke.sh`,`vm_resume.sh`,`vm_zygote.sh`,`vm_smoke_parallel.sh`) must invoke `./scripts/doctor.sh` before VM launch, regardless of `mise` skip state.
-- Expensive tasks must define precise `sources` + `outputs`; incremental skip correctness is a contract.
-- Image pipeline is content-addressed + byte-pinned:
-- manifest pins remote source checksums (`kernel`,`rootfs_squashfs`,`firecracker_tgz`)
-- build verifies downloaded bytes before use
-- cache key must mix manifest + source pins + build logic
-- cache dirs are immutable; never modify `.cache/ghostfleet/images/<sha>/` in place
-- approved fallback matrix is explicit and narrow:
-- `vm:resume`: snapshot attempt then cold-boot fallback with canonical telemetry
-- `pw:install`: `--with-deps` then browser-only retry
-- `bench:snapshot` is a hard perf gate, not trend logging:
-- scope samples to bench cohort
-- enforce `total_samples==iterations`
-- enforce `snapshot_resume_count>=1`
-- enforce p50/p95 budgets from task config
-- Certification SQL helpers on append-only DBs must use explicit cohort scoping.
+- Reuse `scripts/common.sh`; do not fork duplicate helpers for root/hash/lock/labels.
+
+- `doctor` is hard preflight:
+- must run on cold clone.
+- must emit explicit `FAIL:` with direct remediation.
+- must accept built-in KVM detection via `/sys/module/kvm`.
+- must verify lock-selected artifact triplet + executable Firecracker + AF_UNIX bind/unlink.
+
+- Runtime-critical wrappers (`vm_smoke.sh`,`vm_resume.sh`,`vm_zygote.sh`,`vm_smoke_parallel.sh`) must invoke `./scripts/doctor.sh` prelaunch even if `mise` cache would skip upstream tasks.
+- Expensive tasks must declare precise `sources`+`outputs`; incremental skip correctness is contractual.
+
+- Image pipeline contract:
+- selector is `vm/images.lock`; cache root is `.cache/ghostfleet/images/<sha>/`.
+- manifest pins checksums (`kernel`,`rootfs_squashfs`,`firecracker_tgz`); downloaded bytes are verified pre-build.
+- key calc must be canonical and deterministic across env/tool variance.
+- cache dirs are immutable/write-once; never mutate in place.
+- concurrent image builds must serialize with bounded lock wait + stale-owner recovery.
+- air-gapped seed path (`image:seed`) must produce the same cache shape markers as network build (`.complete`, `.manifest-built`).
+
+- Ship/cert contract:
+- release proof must be fresh-run evidence; cache-only pass is invalid.
+- `ship:core` must execute uncached core gates and emit cohort tag/artifacts.
+- SQL cert on append-only DB must be cohort-scoped unless legacy rows are backfilled.
+
+- Perf/correctness gates:
+- `bench:snapshot` is hard gate (not trend log): `total_samples==iterations`, `snapshot_resume_count==iterations`, `fallback_count==0`, p50/p95 within budget.
+- cleanup audit is hard gate: zero orphan `firecracker` procs; zero stale `firecracker.sock`,`vsock*.sock`,`*.fifo`; zero leaked `virmux-tap*`.
+
+- Optional lanes (`vm:net:probe`,`slack:recv`,`pw:*`) stay isolated unless explicitly promoted to core.
 - Task names are public API; renames require same-diff updates to callers/docs/tests.

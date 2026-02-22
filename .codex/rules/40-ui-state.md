@@ -8,15 +8,16 @@ paths:
   - "**/*.css"
 ---
 # UI + State Rules (future-facing)
-- UI is an operator console, not marketing: terse copy, explicit statuses, zero decorative ambiguity.
-- Backend contracts are source-of-truth (`runs`,`events`,`artifacts`,`trace`); UI must not invent alternate truth models.
+- UI is an operator console, not marketing: terse copy, explicit statuses, no decorative ambiguity.
+- Backend contracts are source-of-truth (`runs`,`events`,`tool_calls`,`artifacts`,`trace`); UI must not invent alternate models.
 - State split is strict:
-- server state = immutable snapshots keyed by IDs
-- UI state = ephemeral view controls (filters/sort/panels)
-- derived state = pure selectors only; no duplicated denormalized caches
+- server state = immutable snapshots keyed by IDs.
+- UI state = ephemeral controls only (filters/sort/panels).
+- derived state = pure selectors; no duplicated denormalized caches.
 - Render contract:
-- primary timestamps shown in UTC
-- raw IDs, modes, and status enums remain visible (not prettified away)
-- resume telemetry keys (`resume_mode`,`resume_source`,`resume_error`) remain first-class in views
-- Error UX shows failing invariant and immediate repair command (`doctor`,`trace:validate`,`db:check`,`vm:cleanup:audit`, etc.).
-- New UI features require deterministic replay fixtures plus >=1 headless smoke assertion tied to contract data.
+- timestamps default UTC.
+- raw IDs/enums/modes stay visible (no lossy prettification).
+- resume keys (`resume_mode`,`resume_source`,`resume_error`) and failure keys (`error_code`,`error_retryable`) stay first-class.
+- tool evidence linkage (hash/ref/path) must be inspectable in one click path.
+- Error UX must show violated invariant + next repair command (`doctor`,`trace:validate`,`db:check`,`vm:cleanup:audit`,`ship:core`).
+- New UI features require deterministic replay fixtures plus >=1 headless assertion tied to contract rows/events.
