@@ -22,7 +22,7 @@ if [[ "$fk_errs" -ne 0 ]]; then
   exit 1
 fi
 
-required_indexes=(idx_events_run_id idx_runs_started_at)
+required_indexes=(idx_events_run_id idx_runs_started_at idx_artifacts_run_id)
 for idx in "${required_indexes[@]}"; do
   c="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='$idx';")"
   if [[ "$c" != "1" ]]; then

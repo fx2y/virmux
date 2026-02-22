@@ -2,9 +2,12 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestStoreSchemaAndFK(t *testing.T) {
@@ -24,6 +27,8 @@ func TestStoreSchemaAndFK(t *testing.T) {
 		Label:     "test",
 		AgentID:   "A",
 		ImageSHA:  "abc",
+		KernelSHA: "k1",
+		RootfsSHA: "r1",
 		StartedAt: time.Now(),
 	}
 	if err := s.StartRun(ctx, run); err != nil {
@@ -35,7 +40,7 @@ func TestStoreSchemaAndFK(t *testing.T) {
 	if err := s.InsertEvent(ctx, "missing", "bad", `{}`, time.Now()); err == nil {
 		t.Fatalf("expected fk error for unknown run_id")
 	}
-	if err := s.FinishRun(ctx, run.ID, "ok", 10, 0, "runs/run-1/trace.jsonl", time.Now()); err != nil {
+	if err := s.FinishRun(ctx, run.ID, "ok", 10, 0, "runs/run-1/trace.jsonl", "snap-1", 0.25, time.Now()); err != nil {
 		t.Fatalf("finish run: %v", err)
 	}
 	var got string
@@ -44,5 +49,59 @@ func TestStoreSchemaAndFK(t *testing.T) {
 	}
 	if got != "A" {
 		t.Fatalf("expected agent_id A, got %q", got)
+	}
+	if err := s.InsertArtifact(ctx, run.ID, "runs/run-1/serial.log", "deadbeef", 42); err != nil {
+		t.Fatalf("insert artifact: %v", err)
+	}
+	if err := s.InsertArtifact(ctx, "missing", "x", "y", 1); err == nil {
+		t.Fatalf("expected fk error for missing run in artifacts")
+	}
+	var idxCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_artifacts_run_id'`).Scan(&idxCount); err != nil {
+		t.Fatalf("query artifacts index: %v", err)
+	}
+	if idxCount != 1 {
+		t.Fatalf("expected idx_artifacts_run_id, got %d", idxCount)
+	}
+}
+
+func TestOpenMigratesLegacyRunsTable(t *testing.T) {
+	t.Parallel()
+	dbPath := filepath.Join(t.TempDir(), "legacy.sqlite")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`
+CREATE TABLE runs (
+  id TEXT PRIMARY KEY,
+  task TEXT NOT NULL,
+  label TEXT NOT NULL DEFAULT '',
+  image_sha TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'running',
+  started_at TEXT NOT NULL,
+  ended_at TEXT,
+  boot_ms INTEGER NOT NULL DEFAULT 0,
+  resume_ms INTEGER NOT NULL DEFAULT 0,
+  trace_path TEXT NOT NULL DEFAULT ''
+);`); err != nil {
+		t.Fatalf("create legacy runs: %v", err)
+	}
+
+	s, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open migrated store: %v", err)
+	}
+	defer s.Close()
+
+	for _, col := range []string{"agent_id", "kernel_sha", "rootfs_sha", "snapshot_id", "cost_est"} {
+		var n int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name=?`, col).Scan(&n); err != nil {
+			t.Fatalf("query column %s: %v", col, err)
+		}
+		if n != 1 {
+			t.Fatalf("missing migrated column %s", col)
+		}
 	}
 }

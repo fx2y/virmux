@@ -26,9 +26,9 @@ func NewWriter(path string) (*Writer, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create trace dir: %w", err)
 	}
-	f, err := os.Create(path)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		return nil, fmt.Errorf("create trace file: %w", err)
+		return nil, fmt.Errorf("open trace file: %w", err)
 	}
 	return &Writer{file: f, buf: bufio.NewWriter(f)}, nil
 }

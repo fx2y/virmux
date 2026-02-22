@@ -1,10 +1,13 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/haris/virmux/internal/agent"
 	"github.com/haris/virmux/internal/vm"
 )
 
@@ -64,5 +67,58 @@ func TestRunUsageIncludesVMRun(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "vm-run") {
 		t.Fatalf("usage should mention vm-run, got %q", err.Error())
+	}
+}
+
+func TestParseVMRunArgsIncludesVsockCID(t *testing.T) {
+	t.Parallel()
+	cfg, _, err := parseVMRunArgs("vm-run", []string{"--cmd", "echo ok", "--vsock-cid", "7"}, "uname -a")
+	if err != nil {
+		t.Fatalf("parse vm-run args: %v", err)
+	}
+	if cfg.vsockCID != 7 {
+		t.Fatalf("expected vsock cid 7, got %d", cfg.vsockCID)
+	}
+}
+
+func TestResolveResumeSnapshotPathsPrefersAgentSnapshot(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	base := filepath.Join(tmp, "snapshots")
+	meta := agent.Meta{LastSnapshotID: "snap-42"}
+	got, err := resolveResumeSnapshotPaths(base, meta, "", "")
+	if err != nil {
+		t.Fatalf("resolve paths: %v", err)
+	}
+	if got.source != "agent_last_snapshot" {
+		t.Fatalf("expected agent_last_snapshot source, got %q", got.source)
+	}
+	if !strings.Contains(got.memPath, "snap-42") || !strings.Contains(got.statePath, "snap-42") {
+		t.Fatalf("expected snapshot-id paths, got mem=%q state=%q", got.memPath, got.statePath)
+	}
+	if got.snapshotID != "snap-42" {
+		t.Fatalf("expected snapshotID snap-42, got %q", got.snapshotID)
+	}
+}
+
+func TestResolveResumeSnapshotPathsFallsBackToLatestJSON(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	base := filepath.Join(tmp, "snapshots")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "latest.json"), []byte(`{"snapshot_id":"snap-json","mem_path":"/m","state_path":"/s"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveResumeSnapshotPaths(base, agent.Meta{}, "", "")
+	if err != nil {
+		t.Fatalf("resolve paths: %v", err)
+	}
+	if got.source != "latest_json" {
+		t.Fatalf("expected latest_json source, got %q", got.source)
+	}
+	if got.memPath != "/m" || got.statePath != "/s" || got.snapshotID != "snap-json" {
+		t.Fatalf("unexpected latest.json mapping: %+v", got)
 	}
 }

@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -28,6 +31,7 @@ type runCommon struct {
 	label      string
 	agentID    string
 	memMiB     int64
+	vsockCID   int64
 	timeout    time.Duration
 }
 
@@ -80,6 +84,7 @@ func commonFlags(name string) (*flag.FlagSet, *runCommon, *int) {
 	fs.StringVar(&cfg.agentID, "agent", "default", "agent id")
 	timeoutSec := fs.Int("timeout-sec", 30, "vm timeout in seconds")
 	fs.Int64Var(&cfg.memMiB, "mem-mib", 512, "microVM memory MiB")
+	fs.Int64Var(&cfg.vsockCID, "vsock-cid", 0, "experimental vsock CID for vm-run (0 disables)")
 	return fs, cfg, timeoutSec
 }
 
@@ -100,12 +105,20 @@ func parseVMRunArgs(name string, args []string, defaultCmd string) (*runCommon, 
 func newVMRunRunner(cfg *runCommon, command string, requiredMarkers []string) vmRunner {
 	return func(ctx context.Context, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
 		var emitErr error
+		vsockPath := ""
+		if cfg.vsockCID > 0 {
+			vsockPath = filepath.Join(runDir, fmt.Sprintf("vsock-%d.sock", cfg.vsockCID))
+		}
 		outcome, err := vm.Run(ctx, art, runDir, vm.RunConfig{
 			MemMiB:          cfg.memMiB,
 			Timeout:         cfg.timeout,
 			Command:         command,
 			RequiredMarkers: requiredMarkers,
 			DataVolumePath:  meta.VolumePath,
+			ChunkEventLimit: 8,
+			ChunkBytes:      512,
+			VsockCID:        cfg.vsockCID,
+			VsockPath:       vsockPath,
 			EventHook: func(evt vm.Event) {
 				if emitErr != nil {
 					return
@@ -116,8 +129,70 @@ func newVMRunRunner(cfg *runCommon, command string, requiredMarkers []string) vm
 		if emitErr != nil {
 			return vm.Outcome{}, nil, emitErr
 		}
-		return outcome, map[string]any{"serial_log": filepath.Join(runDir, "serial.log")}, err
+		details := map[string]any{"serial_log": filepath.Join(runDir, "serial.log")}
+		if vsockPath != "" {
+			details["vsock_uds_path"] = vsockPath
+		}
+		return outcome, details, err
 	}
+}
+
+const (
+	resumeModeSnapshot       = "snapshot_resume"
+	resumeModeFallback       = "fallback_cold_boot"
+	resumeModeSnapshotLegacy = "snapshot"
+)
+
+type resumeLookup struct {
+	memPath    string
+	statePath  string
+	source     string
+	snapshotID string
+}
+
+func resolveResumeSnapshotPaths(base string, meta agent.Meta, inMemPath, inStatePath string) (resumeLookup, error) {
+	out := resumeLookup{
+		memPath:   inMemPath,
+		statePath: inStatePath,
+		source:    "explicit_flags",
+	}
+	if out.memPath != "" && out.statePath != "" {
+		return out, nil
+	}
+	if meta.LastSnapshotID != "" {
+		if out.memPath == "" {
+			out.memPath = filepath.Join(base, meta.LastSnapshotID, "vm.mem")
+		}
+		if out.statePath == "" {
+			out.statePath = filepath.Join(base, meta.LastSnapshotID, "vm.state")
+		}
+		if out.memPath != "" && out.statePath != "" {
+			out.source = "agent_last_snapshot"
+			out.snapshotID = meta.LastSnapshotID
+			return out, nil
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(base, "latest.json"))
+	if err != nil {
+		return resumeLookup{}, fmt.Errorf("read latest snapshot metadata: %w", err)
+	}
+	var latest struct {
+		SnapshotID string `json:"snapshot_id"`
+		MemPath    string `json:"mem_path"`
+		StatePath  string `json:"state_path"`
+	}
+	if err := json.Unmarshal(data, &latest); err != nil {
+		return resumeLookup{}, fmt.Errorf("parse latest snapshot metadata: %w", err)
+	}
+	if out.memPath == "" {
+		out.memPath = latest.MemPath
+	}
+	if out.statePath == "" {
+		out.statePath = latest.StatePath
+	}
+	out.source = "latest_json"
+	out.snapshotID = latest.SnapshotID
+	return out, nil
 }
 
 func cmdVMRun(args []string) error {
@@ -204,46 +279,29 @@ func cmdVMResume(args []string) error {
 	cfg.timeout = time.Duration(*timeoutSec) * time.Second
 
 	return runWithStore(cfg, "vm:resume", map[string]any{"label": cfg.label}, func(ctx context.Context, art vm.Artifacts, meta agent.Meta, runDir string, _ vmEventEmitter) (vm.Outcome, map[string]any, error) {
-		mPath := *memPath
-		sPath := *statePath
 		base := *snapshotDir
 		if base == "" {
 			repoRoot := filepath.Dir(filepath.Dir(cfg.imagesLock))
 			base = filepath.Join(repoRoot, "vm", "snapshots", art.ImageSHA, cfg.agentID)
 		}
-		if mPath == "" || sPath == "" {
-			if meta.LastSnapshotID != "" {
-				if mPath == "" {
-					mPath = filepath.Join(base, meta.LastSnapshotID, "vm.mem")
-				}
-				if sPath == "" {
-					sPath = filepath.Join(base, meta.LastSnapshotID, "vm.state")
-				}
-			}
-			if mPath == "" || sPath == "" {
-				data, err := os.ReadFile(filepath.Join(base, "latest.json"))
-				if err != nil {
-					return vm.Outcome{}, nil, fmt.Errorf("read latest snapshot metadata: %w", err)
-				}
-				var latest struct {
-					MemPath   string `json:"mem_path"`
-					StatePath string `json:"state_path"`
-				}
-				if err := json.Unmarshal(data, &latest); err != nil {
-					return vm.Outcome{}, nil, fmt.Errorf("parse latest snapshot metadata: %w", err)
-				}
-				if mPath == "" {
-					mPath = latest.MemPath
-				}
-				if sPath == "" {
-					sPath = latest.StatePath
-				}
-			}
+		resume, err := resolveResumeSnapshotPaths(base, meta, *memPath, *statePath)
+		if err != nil {
+			return vm.Outcome{}, nil, err
 		}
-
-		outcome, err := vm.Resume(ctx, art, runDir, mPath, sPath, cfg.memMiB, cfg.timeout, meta.VolumePath)
+		details := map[string]any{
+			"mem_path":           resume.memPath,
+			"state_path":         resume.statePath,
+			"resume_source":      resume.source,
+			"resume_mode_legacy": resumeModeSnapshotLegacy,
+			"resume_error":       "",
+		}
+		if resume.snapshotID != "" {
+			details["snapshot_id"] = resume.snapshotID
+		}
+		outcome, err := vm.Resume(ctx, art, runDir, resume.memPath, resume.statePath, cfg.memMiB, cfg.timeout, meta.VolumePath)
 		if err == nil {
-			return outcome, map[string]any{"mem_path": mPath, "state_path": sPath, "resume_mode": "snapshot_resume"}, nil
+			details["resume_mode"] = resumeModeSnapshot
+			return outcome, details, nil
 		}
 		fallbackDir := filepath.Join(runDir, "fallback-coldboot")
 		fallback, fbErr := vm.Smoke(ctx, art, fallbackDir, cfg.memMiB, cfg.timeout, meta.VolumePath)
@@ -252,13 +310,11 @@ func cmdVMResume(args []string) error {
 		}
 		fallback.ResumeMS = fallback.BootMS
 		fallback.BootMS = 0
-		return fallback, map[string]any{
-			"mem_path":       mPath,
-			"state_path":     sPath,
-			"resume_mode":    "fallback_cold_boot",
-			"resume_error":   err.Error(),
-			"fallback_trace": filepath.Join(fallbackDir, "serial.log"),
-		}, nil
+		details["resume_mode"] = resumeModeFallback
+		details["resume_error"] = err.Error()
+		details["resume_source"] = "fallback_cold_boot"
+		details["fallback_trace"] = filepath.Join(fallbackDir, "serial.log")
+		return fallback, details, nil
 	}, defaultRunRuntime)
 }
 
@@ -308,7 +364,16 @@ func runWithStore(cfg *runCommon, task string, startedPayload map[string]any, ru
 	}
 	defer tw.Close()
 
-	if err := st.StartRun(ctx, store.Run{ID: runID, Task: task, Label: cfg.label, AgentID: cfg.agentID, ImageSHA: art.ImageSHA, StartedAt: started}); err != nil {
+	if err := st.StartRun(ctx, store.Run{
+		ID:        runID,
+		Task:      task,
+		Label:     cfg.label,
+		AgentID:   cfg.agentID,
+		ImageSHA:  art.ImageSHA,
+		KernelSHA: art.KernelSHA,
+		RootfsSHA: art.RootfsSHA,
+		StartedAt: started,
+	}); err != nil {
 		return err
 	}
 	if startedPayload == nil {
@@ -344,7 +409,20 @@ func runWithStore(cfg *runCommon, task string, startedPayload map[string]any, ru
 	if err := emit(ctx, st, tw, runID, task, "run.finished", payload, runtime.now); err != nil {
 		return err
 	}
-	if err := st.FinishRun(ctx, runID, status, outcome.BootMS, outcome.ResumeMS, tracePath, runtime.now().UTC()); err != nil {
+	snapshotID := stringDetail(payload, "snapshot_id")
+	costEst := estimateCost(outcome.BootMS, outcome.ResumeMS, cfg.memMiB)
+	if err := st.FinishRun(ctx, runID, status, outcome.BootMS, outcome.ResumeMS, tracePath, snapshotID, costEst, runtime.now().UTC()); err != nil {
+		return err
+	}
+	if err := persistRunArtifacts(ctx, st, runID, []string{
+		filepath.Join(runDir, "serial.log"),
+		filepath.Join(runDir, "firecracker.stderr.log"),
+		tracePath,
+		stringDetail(payload, "mem_path"),
+		stringDetail(payload, "state_path"),
+		stringDetail(payload, "fallback_trace"),
+		stringDetail(payload, "vsock_uds_path"),
+	}); err != nil {
 		return err
 	}
 
@@ -363,6 +441,60 @@ func runWithStore(cfg *runCommon, task string, startedPayload map[string]any, ru
 		return runErr
 	}
 	return nil
+}
+
+func estimateCost(bootMS, resumeMS, memMiB int64) float64 {
+	totalSeconds := float64(bootMS+resumeMS) / 1000.0
+	memGiB := float64(memMiB) / 1024.0
+	return totalSeconds * memGiB
+}
+
+func stringDetail(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	v, ok := m[key]
+	if !ok {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
+}
+
+func persistRunArtifacts(ctx context.Context, st *store.Store, runID string, paths []string) error {
+	for _, p := range paths {
+		if strings.TrimSpace(p) == "" {
+			continue
+		}
+		info, err := os.Stat(p)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return fmt.Errorf("stat artifact %s: %w", p, err)
+		}
+		sum, err := fileSHA256(p)
+		if err != nil {
+			return fmt.Errorf("hash artifact %s: %w", p, err)
+		}
+		if err := st.InsertArtifact(ctx, runID, p, sum, info.Size()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func emit(ctx context.Context, st *store.Store, tw *trace.Writer, runID, task, event string, payload map[string]any, now func() time.Time) error {

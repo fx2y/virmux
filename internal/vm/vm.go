@@ -3,6 +3,8 @@ package vm
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +20,8 @@ import (
 
 type Artifacts struct {
 	ImageSHA    string
+	KernelSHA   string
+	RootfsSHA   string
 	Dir         string
 	Firecracker string
 	Kernel      string
@@ -43,6 +47,10 @@ type RunConfig struct {
 	Command         string
 	RequiredMarkers []string
 	DataVolumePath  string
+	ChunkEventLimit int
+	ChunkBytes      int
+	VsockCID        int64
+	VsockPath       string
 	EventHook       EventHook
 }
 
@@ -75,7 +83,30 @@ func LoadArtifacts(imagesLockPath string) (Artifacts, error) {
 			return Artifacts{}, fmt.Errorf("artifact missing (%s): %w", p, err)
 		}
 	}
+	kernelSHA, err := fileSHA256(art.Kernel)
+	if err != nil {
+		return Artifacts{}, fmt.Errorf("hash kernel: %w", err)
+	}
+	rootfsSHA, err := fileSHA256(art.Rootfs)
+	if err != nil {
+		return Artifacts{}, fmt.Errorf("hash rootfs: %w", err)
+	}
+	art.KernelSHA = kernelSHA
+	art.RootfsSHA = rootfsSHA
 	return art, nil
+}
+
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 type session struct {
@@ -157,7 +188,7 @@ func buildDrives(art Artifacts, dataVolumePath string) []models.Drive {
 	return drives
 }
 
-func startSession(ctx context.Context, art Artifacts, runDir string, memMiB int64, dataVolumePath string, snapshot *firecracker.SnapshotConfig, eventHook EventHook) (*session, int64, error) {
+func startSession(ctx context.Context, art Artifacts, runDir string, memMiB int64, dataVolumePath string, snapshot *firecracker.SnapshotConfig, vsock *firecracker.VsockDevice, eventHook EventHook) (*session, int64, error) {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		return nil, 0, fmt.Errorf("create run dir: %w", err)
 	}
@@ -191,6 +222,9 @@ func startSession(ctx context.Context, art Artifacts, runDir string, memMiB int6
 	}
 	if snapshot != nil {
 		cfg.Snapshot = *snapshot
+	}
+	if vsock != nil {
+		cfg.VsockDevices = []firecracker.VsockDevice{*vsock}
 	}
 
 	cmd := firecracker.VMCommandBuilder{}.
@@ -253,7 +287,8 @@ func Run(ctx context.Context, art Artifacts, runDir string, cfg RunConfig) (Outc
 		return Outcome{}, errors.New("vm timeout must be > 0")
 	}
 
-	s, bootMS, err := startSession(ctx, art, runDir, cfg.MemMiB, cfg.DataVolumePath, nil, cfg.EventHook)
+	vsock := resolveVsockDevice(cfg.VsockCID, cfg.VsockPath)
+	s, bootMS, err := startSession(ctx, art, runDir, cfg.MemMiB, cfg.DataVolumePath, nil, vsock, cfg.EventHook)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -276,22 +311,69 @@ func Run(ctx context.Context, art Artifacts, runDir string, cfg RunConfig) (Outc
 	emitEvent(cfg.EventHook, "vm.exit.observed", exitPayload)
 
 	serial := s.serialBuf.String()
+	emitSerialChunks(cfg.EventHook, serial, cfg.ChunkEventLimit, cfg.ChunkBytes)
+	if err := validateSerialMarkers(serial, cfg.RequiredMarkers, waitErr); err != nil {
+		return Outcome{}, err
+	}
+	return Outcome{BootMS: bootMS, Serial: serial}, nil
+}
+
+func validateSerialMarkers(serial string, required []string, waitErr error) error {
 	if !strings.Contains(serial, "__cmd_end__") {
 		if waitErr != nil {
-			return Outcome{}, fmt.Errorf("vm command markers missing; wait err=%w", waitErr)
+			return fmt.Errorf("vm command markers missing; wait err=%w", waitErr)
 		}
-		return Outcome{}, errors.New("vm command markers missing (__cmd_end__)")
+		return errors.New("vm command markers missing (__cmd_end__)")
 	}
-	for _, marker := range cfg.RequiredMarkers {
+	for _, marker := range required {
 		if strings.Contains(serial, marker) {
 			continue
 		}
 		if waitErr != nil {
-			return Outcome{}, fmt.Errorf("vm output missing marker %q; wait err=%w", marker, waitErr)
+			return fmt.Errorf("vm output missing marker %q; wait err=%w", marker, waitErr)
 		}
-		return Outcome{}, fmt.Errorf("vm output missing marker %q", marker)
+		return fmt.Errorf("vm output missing marker %q", marker)
 	}
-	return Outcome{BootMS: bootMS, Serial: serial}, nil
+	return nil
+}
+
+func emitSerialChunks(hook EventHook, serial string, limit, chunkBytes int) {
+	if hook == nil || limit <= 0 {
+		return
+	}
+	if chunkBytes <= 0 {
+		chunkBytes = 512
+	}
+	raw := []byte(serial)
+	if len(raw) == 0 {
+		return
+	}
+	start := 0
+	emitted := 0
+	for start < len(raw) && emitted < limit {
+		end := start + chunkBytes
+		if end > len(raw) {
+			end = len(raw)
+		}
+		emitEvent(hook, "vm.serial.chunk", map[string]any{
+			"index": emitted,
+			"chunk": string(raw[start:end]),
+			"total": len(raw),
+		})
+		emitted++
+		start = end
+	}
+}
+
+func resolveVsockDevice(cid int64, udsPath string) *firecracker.VsockDevice {
+	if cid <= 0 || strings.TrimSpace(udsPath) == "" {
+		return nil
+	}
+	return &firecracker.VsockDevice{
+		ID:   "vsock0",
+		Path: udsPath,
+		CID:  uint32(cid),
+	}
 }
 
 func Smoke(ctx context.Context, art Artifacts, runDir string, memMiB int64, timeout time.Duration, dataVolumePath string) (Outcome, error) {
@@ -305,7 +387,7 @@ func Smoke(ctx context.Context, art Artifacts, runDir string, memMiB int64, time
 }
 
 func Zygote(ctx context.Context, art Artifacts, runDir, snapshotDir string, memMiB int64, timeout time.Duration, dataVolumePath string) (Outcome, string, string, error) {
-	s, bootMS, err := startSession(ctx, art, runDir, memMiB, dataVolumePath, nil, nil)
+	s, bootMS, err := startSession(ctx, art, runDir, memMiB, dataVolumePath, nil, nil, nil)
 	if err != nil {
 		return Outcome{}, "", "", err
 	}
@@ -336,13 +418,15 @@ func Resume(ctx context.Context, art Artifacts, runDir, memPath, statePath strin
 		SnapshotPath: statePath,
 		ResumeVM:     false,
 	}
-	s, resumeMS, err := startSession(ctx, art, runDir, memMiB, dataVolumePath, snap, nil)
+	s, resumeMS, err := startSession(ctx, art, runDir, memMiB, dataVolumePath, snap, nil, nil)
 	if err != nil {
 		return Outcome{}, err
 	}
 	defer s.close()
 
 	if err := s.machine.ResumeVM(ctx); err != nil {
+		_ = s.machine.StopVMM()
+		_ = waitMachine(ctx, s, timeout)
 		return Outcome{}, fmt.Errorf("resume vm: %w", err)
 	}
 	time.Sleep(500 * time.Millisecond)

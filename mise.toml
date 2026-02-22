@@ -85,7 +85,20 @@ description = "Measure snapshot resume latency repeatedly"
 depends = ["vm:zygote"]
 run = "./scripts/bench_snapshot.sh"
 sources = ["scripts/bench_snapshot.sh", "scripts/vm_resume.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock"]
-outputs = ["runs/.last-bench-snapshot", "runs/virmux.sqlite"]
+outputs = ["runs/.last-bench-snapshot", "runs/bench-snapshot-summary.json", "runs/virmux.sqlite"]
+
+[tasks."vm:net:probe"]
+description = "Optional tap network probe lane (non-blocking; emits skip when unprivileged)"
+depends = ["doctor", "image:stamp"]
+run = "./scripts/vm_net_probe.sh"
+sources = ["scripts/vm_net_probe.sh", "scripts/common.sh", "scripts/doctor.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock"]
+outputs = ["runs/.last-vm-net-probe"]
+
+[tasks."vm:cleanup:audit"]
+description = "Guard: no orphan firecracker process/socket/tap leftovers after VM tasks"
+run = "./scripts/cleanup_audit.sh"
+sources = ["scripts/cleanup_audit.sh", "scripts/common.sh", "runs/.last-smoke-parallel", "runs/**/*"]
+outputs = ["tmp/cleanup-audit.ok", "tmp/cleanup-audit.log"]
 
 [tasks."trace:validate"]
 description = "Validate trace JSONL schema contract"

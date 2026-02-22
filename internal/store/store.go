@@ -13,12 +13,16 @@ import (
 )
 
 type Run struct {
-	ID        string
-	Task      string
-	Label     string
-	AgentID   string
-	ImageSHA  string
-	StartedAt time.Time
+	ID         string
+	Task       string
+	Label      string
+	AgentID    string
+	ImageSHA   string
+	KernelSHA  string
+	RootfsSHA  string
+	SnapshotID string
+	CostEst    float64
+	StartedAt  time.Time
 }
 
 type Store struct {
@@ -60,6 +64,10 @@ CREATE TABLE IF NOT EXISTS runs (
   label TEXT NOT NULL DEFAULT '',
   agent_id TEXT NOT NULL DEFAULT 'default',
   image_sha TEXT NOT NULL,
+  kernel_sha TEXT NOT NULL DEFAULT '',
+  rootfs_sha TEXT NOT NULL DEFAULT '',
+  snapshot_id TEXT NOT NULL DEFAULT '',
+  cost_est REAL NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'running',
   started_at TEXT NOT NULL,
   ended_at TEXT,
@@ -81,8 +89,17 @@ CREATE TABLE IF NOT EXISTS slack_events (
   event_type TEXT NOT NULL,
   payload TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS artifacts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+);
 CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id);
 CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at);
+CREATE INDEX IF NOT EXISTS idx_artifacts_run_id ON artifacts(run_id);
 `
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("ensure schema: %w", err)
@@ -90,18 +107,34 @@ CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at);
 	if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'default'`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("ensure runs.agent_id: %w", err)
 	}
+	if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN kernel_sha TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("ensure runs.kernel_sha: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN rootfs_sha TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("ensure runs.rootfs_sha: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN snapshot_id TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("ensure runs.snapshot_id: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN cost_est REAL NOT NULL DEFAULT 0`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("ensure runs.cost_est: %w", err)
+	}
 	return nil
 }
 
 func (s *Store) StartRun(ctx context.Context, run Run) error {
 	_, err := s.db.ExecContext(
 		ctx,
-		`INSERT INTO runs(id,task,label,agent_id,image_sha,status,started_at) VALUES(?,?,?,?,?,?,?)`,
+		`INSERT INTO runs(id,task,label,agent_id,image_sha,kernel_sha,rootfs_sha,snapshot_id,cost_est,status,started_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
 		run.ID,
 		run.Task,
 		run.Label,
 		run.AgentID,
 		run.ImageSHA,
+		run.KernelSHA,
+		run.RootfsSHA,
+		run.SnapshotID,
+		run.CostEst,
 		"running",
 		run.StartedAt.UTC().Format(time.RFC3339Nano),
 	)
@@ -111,19 +144,36 @@ func (s *Store) StartRun(ctx context.Context, run Run) error {
 	return nil
 }
 
-func (s *Store) FinishRun(ctx context.Context, runID, status string, bootMS, resumeMS int64, tracePath string, endedAt time.Time) error {
+func (s *Store) FinishRun(ctx context.Context, runID, status string, bootMS, resumeMS int64, tracePath, snapshotID string, costEst float64, endedAt time.Time) error {
 	_, err := s.db.ExecContext(
 		ctx,
-		`UPDATE runs SET status=?, ended_at=?, boot_ms=?, resume_ms=?, trace_path=? WHERE id=?`,
+		`UPDATE runs SET status=?, ended_at=?, boot_ms=?, resume_ms=?, trace_path=?, snapshot_id=?, cost_est=? WHERE id=?`,
 		status,
 		endedAt.UTC().Format(time.RFC3339Nano),
 		bootMS,
 		resumeMS,
 		tracePath,
+		snapshotID,
+		costEst,
 		runID,
 	)
 	if err != nil {
 		return fmt.Errorf("finish run: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) InsertArtifact(ctx context.Context, runID, path, sha256 string, sizeBytes int64) error {
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO artifacts(run_id,path,sha256,bytes) VALUES(?,?,?,?)`,
+		runID,
+		path,
+		sha256,
+		sizeBytes,
+	)
+	if err != nil {
+		return fmt.Errorf("insert artifact: %w", err)
 	}
 	return nil
 }
