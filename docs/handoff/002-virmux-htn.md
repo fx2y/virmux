@@ -5,9 +5,9 @@ Expert-grade, ultra-terse procedural guide for Virmux core (HTN 02).
 ## 1. The Stack (L0-L5)
 - **L0 Host:** Ubuntu 24.04 bare-metal. `/dev/kvm` rw. `firecracker-go-sdk` only.
 - **L1 Image:** `vm/images.lock` pins image SHA. Immutable cache: `.cache/ghostfleet/images/<sha>`.
-- **L2 Run:** `vm-run|smoke|zygote|resume`. Serial-first (ttyS0). `poweroff -f` terminal.
+- **L2 Run:** `vm-run|smoke|zygote|resume`. Host still drives bounded `ttyS0` for boot/smoke + bridge injection; vsock is the intended tool data plane when enabled. Host terminates VMM for deterministic completion.
 - **L3 State:** `agents/<id>.json` (meta) + `volumes/<id>.ext4` (durable `/dev/vdb` -> `/dev/virmux-data`).
-- **L4 Data:** `runs/virmux.sqlite` + `runs/<id>/trace.jsonl`. Artifact registry (hashed files + meta-only sockets).
+- **L4 Data:** `runs/virmux.sqlite` + `runs/<id>/trace.ndjson` (`trace.jsonl` compat symlink during bridge). Artifact registry (hashed files + meta-only sockets).
 - **L5 Ops:** `bench:snapshot` SLOs. `cleanup:audit` leak probes.
 
 ## 2. Hard Laws (Contracts)
@@ -75,7 +75,7 @@ Green-light means ALL pass. No exceptions.
 ## 6. Current Observations (Cycle 4 Closure)
 - **Snapshot Resume:** FIXED via `WithSnapshot` SDK opt. No more illegal `PATCH` 400s.
 - **Image Pipeline:** FIXED. Source bytes pinned in `manifest.json`. Cache-key includes source hashes.
-- **Vsock Seam:** Experimental. Added via `--vsock-cid`. Artifacts store `meta:socket` for host UDS.
+- **Vsock Seam:** Host transport + receipt telemetry shipped (`--vsock-cid`); current guest READY/tool path depends on pinned image vsock behavior. Artifacts store `meta:socket` for host UDS.
 - **DB Migrations:** Additive only. `cost_est` and `snapshot_id` are first-class columns.
 
 ## 7. Expert Cheat Sheet

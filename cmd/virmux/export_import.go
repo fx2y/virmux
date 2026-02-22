@@ -34,6 +34,11 @@ type exportBundleMeta struct {
 	Version int    `json:"version"`
 	RunID   string `json:"run_id"`
 	Task    string `json:"task"`
+	Partial bool   `json:"partial,omitempty"`
+}
+
+type exportOptions struct {
+	Partial bool
 }
 
 func cmdExport(args []string) error {
@@ -52,7 +57,7 @@ func cmdExport(args []string) error {
 	if out == "" {
 		out = filepath.Join(*runsDir, *runID+".tar.zst")
 	}
-	return exportRunBundle(context.Background(), *dbPath, *runsDir, *runID, out)
+	return exportRunBundle(context.Background(), *dbPath, *runsDir, *runID, out, exportOptions{})
 }
 
 func cmdImport(args []string) error {
@@ -73,7 +78,7 @@ func flagSet(name string) *flag.FlagSet {
 	return flag.NewFlagSet(name, flag.ContinueOnError)
 }
 
-func exportRunBundle(ctx context.Context, dbPath, runsDir, runID, outPath string) error {
+func exportRunBundle(ctx context.Context, dbPath, runsDir, runID, outPath string, opts exportOptions) error {
 	st, err := store.Open(dbPath)
 	if err != nil {
 		return err
@@ -112,7 +117,7 @@ func exportRunBundle(ctx context.Context, dbPath, runsDir, runID, outPath string
 	if err := writeRunSnapshots(db, runID, filepath.Join(stage, "db")); err != nil {
 		return err
 	}
-	meta := exportBundleMeta{Version: 1, RunID: runID, Task: task}
+	meta := exportBundleMeta{Version: 1, RunID: runID, Task: task, Partial: opts.Partial}
 	if err := writeJSONFile(filepath.Join(stage, "meta.json"), meta); err != nil {
 		return err
 	}

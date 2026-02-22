@@ -112,6 +112,18 @@ run = "./scripts/vm_test_export_roundtrip.sh"
 sources = ["scripts/vm_test_export_roundtrip.sh", "cmd/**/*.go", "internal/**/*.go"]
 outputs = ["tmp/vm-test-export-roundtrip.ok"]
 
+[tasks."vm:test:watchdog"]
+description = "C5 gate: watchdog kill-path emits event and returns without hang (unit contract)"
+run = "./scripts/vm_test_watchdog.sh"
+sources = ["scripts/vm_test_watchdog.sh", "internal/**/*.go"]
+outputs = ["tmp/vm-test-watchdog.ok"]
+
+[tasks."vm:test:crash-partial-export"]
+description = "C5 gate: failed-run taxonomy + partial export metadata/event/artifact contract"
+run = "./scripts/vm_test_crash_partial_export.sh"
+sources = ["scripts/vm_test_crash_partial_export.sh", "cmd/**/*.go", "internal/**/*.go"]
+outputs = ["tmp/vm-test-crash-partial-export.ok"]
+
 [tasks."vm:zygote"]
 description = "Create pause snapshot for zygote-style resumes"
 depends = ["doctor", "image:stamp"]
@@ -162,7 +174,7 @@ sources = ["scripts/vm_net_probe.sh", "scripts/common.sh", "scripts/doctor.sh", 
 outputs = ["runs/.last-vm-net-probe"]
 
 [tasks."vm:cleanup:audit"]
-description = "Guard: no orphan firecracker process/socket/tap leftovers after VM tasks"
+description = "Guard: no orphan firecracker process/socket/vsock/fifo/tap leftovers after VM tasks"
 run = "./scripts/cleanup_audit.sh"
 sources = ["scripts/cleanup_audit.sh", "scripts/common.sh", "runs/.last-smoke-parallel", "runs/**/*"]
 outputs = ["tmp/cleanup-audit.ok", "tmp/cleanup-audit.log"]
@@ -221,8 +233,8 @@ outputs = ["tmp/slack-server.log", "runs/virmux.sqlite"]
 [tasks."ship:core"]
 description = "Uncached core certification lane (runtime execution + fresh-run assertion)"
 run = "./scripts/ship_core.sh"
-sources = ["scripts/ship_core.sh", "scripts/common.sh", "scripts/doctor.sh", "scripts/test_doctor_missing_artifact.sh", "scripts/test_doctor_socket_probe.sh", "scripts/test_image_checksum_mismatch.sh", "scripts/vm_boot_contract.sh", "scripts/vm_vsock_chaos.sh", "scripts/vm_smoke.sh", "scripts/vm_zygote.sh", "scripts/vm_resume.sh", "scripts/test_vm_agent_persistence.sh", "scripts/test_vm_resume_fallback_no_snapshot.sh", "scripts/test_vm_resume_snapshot_success.sh", "scripts/bench_snapshot.sh", "scripts/trace_validate.sh", "scripts/db_check.sh", "scripts/sql_cert_contract.sh", "scripts/cleanup_audit.sh", "scripts/vm_test_export_roundtrip.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock"]
-outputs = ["tmp/ship-core-summary.json", "tmp/cleanup-audit.ok", "runs/bench-snapshot-summary.json", "runs/virmux.sqlite"]
+sources = ["scripts/ship_core.sh", "scripts/common.sh", "scripts/doctor.sh", "scripts/test_doctor_missing_artifact.sh", "scripts/test_doctor_socket_probe.sh", "scripts/test_image_checksum_mismatch.sh", "scripts/vm_boot_contract.sh", "scripts/vm_vsock_chaos.sh", "scripts/vm_smoke.sh", "scripts/vm_zygote.sh", "scripts/vm_resume.sh", "scripts/test_vm_agent_persistence.sh", "scripts/test_vm_resume_fallback_no_snapshot.sh", "scripts/test_vm_resume_snapshot_success.sh", "scripts/bench_snapshot.sh", "scripts/trace_validate.sh", "scripts/db_check.sh", "scripts/sql_cert_contract.sh", "scripts/cleanup_audit.sh", "scripts/vm_test_export_roundtrip.sh", "scripts/vm_test_watchdog.sh", "scripts/vm_test_crash_partial_export.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock", "docs/**/*.md"]
+outputs = ["tmp/ship-core-summary.json", "tmp/cleanup-audit.ok", "tmp/vm-test-watchdog.ok", "tmp/vm-test-crash-partial-export.ok", "runs/bench-snapshot-summary.json", "runs/virmux.sqlite"]
 
 [tasks.fmt]
 description = "Format Go and JS"
@@ -232,13 +244,13 @@ outputs = ["tmp/fmt.ok"]
 
 [tasks.lint]
 description = "Static checks"
-run = ["go vet ./...", "date -u +%Y-%m-%dT%H:%M:%SZ > tmp/lint.ok"]
+run = ["go vet ./cmd/... ./internal/...", "date -u +%Y-%m-%dT%H:%M:%SZ > tmp/lint.ok"]
 sources = ["cmd/**/*.go", "internal/**/*.go", "scripts/pw_smoke.mjs"]
 outputs = ["tmp/lint.ok"]
 
 [tasks."test:unit"]
 description = "Unit test suite"
-run = ["go test ./...", "date -u +%Y-%m-%dT%H:%M:%SZ > tmp/test-unit.ok"]
+run = ["go test ./cmd/... ./internal/...", "date -u +%Y-%m-%dT%H:%M:%SZ > tmp/test-unit.ok"]
 sources = ["cmd/**/*.go", "internal/**/*.go"]
 outputs = ["tmp/test-unit.ok"]
 

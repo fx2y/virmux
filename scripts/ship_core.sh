@@ -25,8 +25,14 @@ mise run ci:fast
 ./scripts/bench_snapshot.sh
 ./scripts/trace_validate.sh
 ./scripts/db_check.sh
+./scripts/vm_test_watchdog.sh
+./scripts/vm_test_crash_partial_export.sh
 VIRMUX_CERT_LABEL_GLOB="$cert_tag-%" ./scripts/sql_cert_contract.sh
 ./scripts/cleanup_audit.sh
+if rg -n "Serial-first \\(ttyS0\\)\\.|serial-first core|runs/\\*/trace\\.jsonl" docs/adr/001-firecracker-contract-first-harness.md docs/handoff/002-virmux-htn.md docs/showcase/002-live-e2e-operator-course.md >/dev/null; then
+  echo "ship:core: docs contract drift (serial-first/trace.jsonl stale claims)" >&2
+  exit 1
+fi
 
 for task in vm:smoke vm:zygote vm:resume; do
   fresh_count="$(sqlite3 "$root/runs/virmux.sqlite" "

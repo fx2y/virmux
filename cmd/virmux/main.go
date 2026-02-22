@@ -39,6 +39,7 @@ type runCommon struct {
 	tool         string
 	allowCSV     string
 	toolArgsJSON string
+	exportOnFail bool
 }
 
 type runRuntime struct {
@@ -71,6 +72,8 @@ var defaultRunRuntime = runRuntime{
 		return fmt.Sprintf("%d-%s", started.UnixNano(), stringsForTask(task))
 	},
 }
+
+var exportRunBundleFunc = exportRunBundle
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -114,6 +117,7 @@ func commonFlags(name string) (*flag.FlagSet, *runCommon, *int) {
 	timeoutSec := fs.Int("timeout-sec", 30, "vm timeout in seconds")
 	fs.Int64Var(&cfg.memMiB, "mem-mib", 512, "microVM memory MiB")
 	fs.Int64Var(&cfg.vsockCID, "vsock-cid", 0, "experimental vsock CID for vm-run (0 disables)")
+	fs.BoolVar(&cfg.exportOnFail, "export-on-fail", true, "auto-export partial run bundle on failed runs")
 	return fs, cfg, timeoutSec
 }
 
@@ -596,7 +600,6 @@ func runWithStore(cfg *runCommon, task string, startedPayload map[string]any, ru
 		if details == nil {
 			details = map[string]any{}
 		}
-		details["error"] = runErr.Error()
 	}
 	payload := map[string]any{
 		"status":    status,
@@ -606,6 +609,7 @@ func runWithStore(cfg *runCommon, task string, startedPayload map[string]any, ru
 	for k, v := range details {
 		payload[k] = v
 	}
+	addFailurePayload(payload, runErr)
 	if task == "vm:resume" {
 		ensureResumeTerminalPayload(payload)
 	}
@@ -640,6 +644,9 @@ func runWithStore(cfg *runCommon, task string, startedPayload map[string]any, ru
 
 	if finishEmitErr != nil || finishErr != nil || artifactErr != nil {
 		return errors.Join(finishEmitErr, finishErr, artifactErr)
+	}
+	if exportErr := maybeAutoExportFailure(ctx, cfg, st, tw, runtime.now, runID, task, status); exportErr != nil {
+		return exportErr
 	}
 	if runErr != nil {
 		return runErr
@@ -678,6 +685,76 @@ func stringDetail(m map[string]any, key string) string {
 	}
 	s, _ := v.(string)
 	return s
+}
+
+type runFailure struct {
+	Code      string `json:"code"`
+	Msg       string `json:"msg"`
+	Retryable bool   `json:"retryable"`
+}
+
+func classifyRunFailure(err error) runFailure {
+	msg := err.Error()
+	low := strings.ToLower(msg)
+	code := "INTERNAL"
+	switch {
+	case strings.Contains(low, "denied"):
+		code = "DENIED"
+	case strings.Contains(low, "timeout"):
+		code = "TIMEOUT"
+	case strings.Contains(low, "disconnect"),
+		strings.Contains(low, "broken pipe"),
+		strings.Contains(low, "connection reset"),
+		strings.Contains(low, "eof"),
+		strings.Contains(low, "connect ack mismatch"):
+		code = "DISCONNECT"
+	case strings.Contains(low, "crash"),
+		strings.Contains(low, "exit rc="),
+		strings.Contains(low, "completion marker"),
+		strings.Contains(low, "start machine"):
+		code = "CRASH"
+	}
+	return runFailure{Code: code, Msg: msg, Retryable: false}
+}
+
+func addFailurePayload(payload map[string]any, err error) {
+	if err == nil {
+		return
+	}
+	f := classifyRunFailure(err)
+	payload["error"] = f.Msg
+	payload["error_code"] = f.Code
+	payload["error_retryable"] = f.Retryable
+	payload["error_obj"] = map[string]any{
+		"code":      f.Code,
+		"msg":       f.Msg,
+		"retryable": f.Retryable,
+	}
+}
+
+func maybeAutoExportFailure(ctx context.Context, cfg *runCommon, st *store.Store, tw *trace.Writer, now func() time.Time, runID, task, status string) error {
+	if status != "failed" || !cfg.exportOnFail {
+		return nil
+	}
+	bundlePath := filepath.Join(cfg.runsDir, runID+".partial.tar.zst")
+	err := exportRunBundleFunc(ctx, cfg.dbPath, cfg.runsDir, runID, bundlePath, exportOptions{Partial: true})
+	payload := map[string]any{
+		"partial":     true,
+		"bundle_path": bundlePath,
+	}
+	if err != nil {
+		payload["status"] = "failed"
+		payload["error"] = err.Error()
+		_ = emit(ctx, st, tw, runID, task, "run.export.partial", payload, now)
+		return fmt.Errorf("auto export partial bundle: %w", err)
+	}
+	payload["status"] = "ok"
+	emitErr := emit(ctx, st, tw, runID, task, "run.export.partial", payload, now)
+	artifactErr := persistRunArtifacts(ctx, st, runID, []string{bundlePath})
+	if emitErr != nil || artifactErr != nil {
+		return errors.Join(emitErr, artifactErr)
+	}
+	return nil
 }
 
 func persistRunArtifacts(ctx context.Context, st *store.Store, runID string, paths []string) error {

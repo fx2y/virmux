@@ -2,7 +2,7 @@
 
 Purpose: extract real value fast from current `virmux` implementation without violating determinism.
 
-Rule zero: never certify from stdout. Certify from `runs/virmux.sqlite` + `runs/*/trace.jsonl` + artifacts rows.
+Rule zero: never certify from stdout. Certify from `runs/virmux.sqlite` + `runs/*/trace.ndjson` (or compat `trace.jsonl` symlink) + artifacts rows.
 
 ## 0) Non-negotiables (read once, obey forever)
 - Host: Ubuntu 24.04 bare-metal, `/dev/kvm` rw, Firecracker via go-sdk only.
@@ -275,7 +275,7 @@ mise run ship:core
 ```
 Ship only if all green and evidence exists:
 - `runs/virmux.sqlite`
-- `runs/*/trace.jsonl`
+- `runs/*/trace.ndjson` (compat `trace.jsonl` symlink may also exist)
 - `runs/bench-snapshot-summary.json`
 - `tmp/doctor.ok`
 - `tmp/cleanup-audit.log`

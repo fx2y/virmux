@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -85,10 +86,10 @@ func TestExportImportDeterministicRoundTrip(t *testing.T) {
 
 	b1 := filepath.Join(tmp, "b1.tar.zst")
 	b2 := filepath.Join(tmp, "b2.tar.zst")
-	if err := exportRunBundle(context.Background(), dbPath, runsDir, runID, b1); err != nil {
+	if err := exportRunBundle(context.Background(), dbPath, runsDir, runID, b1, exportOptions{}); err != nil {
 		t.Fatalf("export #1: %v", err)
 	}
-	if err := exportRunBundle(context.Background(), dbPath, runsDir, runID, b2); err != nil {
+	if err := exportRunBundle(context.Background(), dbPath, runsDir, runID, b2, exportOptions{}); err != nil {
 		t.Fatalf("export #2: %v", err)
 	}
 	raw1, err := os.ReadFile(b1)
@@ -129,5 +130,76 @@ func TestExportImportDeterministicRoundTrip(t *testing.T) {
 	}
 	if tcCount != 1 {
 		t.Fatalf("expected 1 tool_call, got %d", tcCount)
+	}
+}
+
+func TestExportRunBundleMarksPartialMeta(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("zstd"); err != nil {
+		t.Skip("zstd not installed")
+	}
+	tmp := t.TempDir()
+	runsDir := filepath.Join(tmp, "runs")
+	dbPath := filepath.Join(runsDir, "virmux.sqlite")
+	runID := "rid-partial"
+	runDir := filepath.Join(runsDir, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "trace.ndjson"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := st.StartRun(ctx, store.Run{
+		ID:        runID,
+		Task:      "vm:run",
+		Label:     "partial",
+		AgentID:   "A",
+		ImageSHA:  "img",
+		KernelSHA: "k",
+		RootfsSHA: "r",
+		StartedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FinishRun(ctx, runID, "failed", 0, 0, filepath.Join(runDir, "trace.ndjson"), "", 0, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+
+	bundle := filepath.Join(tmp, "partial.tar.zst")
+	if err := exportRunBundle(context.Background(), dbPath, runsDir, runID, bundle, exportOptions{Partial: true}); err != nil {
+		t.Fatalf("partial export: %v", err)
+	}
+
+	stage := filepath.Join(tmp, "stage")
+	if err := os.MkdirAll(stage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractZstdTar(bundle, stage); err != nil {
+		t.Fatal(err)
+	}
+	var meta exportBundleMeta
+	if err := readJSONFile(filepath.Join(stage, "meta.json"), &meta); err != nil {
+		t.Fatal(err)
+	}
+	if !meta.Partial {
+		t.Fatalf("expected partial=true in export meta")
+	}
+	var rawMeta map[string]any
+	b, err := os.ReadFile(filepath.Join(stage, "meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &rawMeta); err != nil {
+		t.Fatal(err)
+	}
+	if rawMeta["partial"] != true {
+		t.Fatalf("expected raw meta partial=true, got %#v", rawMeta["partial"])
 	}
 }

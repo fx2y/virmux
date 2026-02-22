@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/haris/virmux/internal/agent"
 	"github.com/haris/virmux/internal/store"
+	"github.com/haris/virmux/internal/trace"
 	"github.com/haris/virmux/internal/vm"
 )
 
@@ -306,5 +308,101 @@ func Test_runWithStorePrepareRunFilesCreatesAliasAndMeta(t *testing.T) {
 	}
 	if got := meta["trace_compat_path"]; got != traceCompatName {
 		t.Fatalf("expected trace_compat_path=%q, got %#v", traceCompatName, got)
+	}
+}
+
+func TestClassifyRunFailure(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{errors.New("wait for exec completion timeout after 3s"), "TIMEOUT"},
+		{errors.New("bridge CONNECT ack mismatch: bad"), "DISCONNECT"},
+		{errors.New("read EOF"), "DISCONNECT"},
+		{errors.New("vm command exit rc=1"), "CRASH"},
+		{errors.New("access denied"), "DENIED"},
+		{errors.New("weird host bug"), "INTERNAL"},
+	}
+	for _, tc := range cases {
+		if got := classifyRunFailure(tc.err); got.Code != tc.want || got.Retryable {
+			t.Fatalf("classify %q => %+v want code=%s retryable=false", tc.err, got, tc.want)
+		}
+	}
+}
+
+func TestMaybeAutoExportFailureEmitsPartialEventAndArtifact(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	dbPath := filepath.Join(tmp, "runs.sqlite")
+	runsDir := filepath.Join(tmp, "runs")
+	runID := "rid-fail"
+	runDir := filepath.Join(runsDir, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tracePath := filepath.Join(runDir, "trace.ndjson")
+	if err := os.WriteFile(tracePath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 2, 22, 20, 0, 0, 0, time.UTC)
+	if err := st.StartRun(ctx, store.Run{
+		ID:        runID,
+		Task:      "vm:run",
+		Label:     "c5",
+		AgentID:   "A",
+		ImageSHA:  "img",
+		KernelSHA: "k",
+		RootfsSHA: "r",
+		StartedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FinishRun(ctx, runID, "failed", 0, 0, tracePath, "", 0, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	tw, err := trace.NewWriter(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tw.Close()
+	cfg := &runCommon{dbPath: dbPath, runsDir: runsDir, exportOnFail: true}
+	old := exportRunBundleFunc
+	defer func() { exportRunBundleFunc = old }()
+	exportRunBundleFunc = func(ctx context.Context, dbPath, runsDir, runID, outPath string, opts exportOptions) error {
+		if !opts.Partial {
+			t.Fatalf("expected partial export option")
+		}
+		if err := os.WriteFile(outPath, []byte("bundle"), 0o644); err != nil {
+			return err
+		}
+		return nil
+	}
+	if err := maybeAutoExportFailure(ctx, cfg, st, tw, func() time.Time { return now }, runID, "vm:run", "failed"); err != nil {
+		t.Fatalf("maybeAutoExportFailure: %v", err)
+	}
+	var kind, payloadRaw, sha string
+	var bytes int64
+	if err := st.DB().QueryRow(`SELECT kind,payload FROM events WHERE run_id=? AND kind='run.export.partial' ORDER BY id DESC LIMIT 1`, runID).Scan(&kind, &payloadRaw); err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(payloadRaw), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["status"] != "ok" || payload["partial"] != true {
+		t.Fatalf("unexpected export payload: %+v", payload)
+	}
+	if err := st.DB().QueryRow(`SELECT sha256,bytes FROM artifacts WHERE run_id=? AND path=?`, runID, filepath.Join(runsDir, runID+".partial.tar.zst")).Scan(&sha, &bytes); err != nil {
+		t.Fatal(err)
+	}
+	if sha == "" || bytes == 0 {
+		t.Fatalf("expected recorded bundle artifact, got sha=%q bytes=%d", sha, bytes)
 	}
 }

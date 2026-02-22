@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	firecracker "github.com/firecracker-microvm/firecracker-go-sdk"
@@ -576,9 +577,100 @@ func startSession(ctx context.Context, art Artifacts, runDir string, memMiB int6
 }
 
 func waitMachine(ctx context.Context, s *session, timeout time.Duration) error {
+	return waitMachineWithWatchdog(ctx, s, timeout, nil)
+}
+
+type watchdogMachine interface {
+	Wait(context.Context) error
+	PID() (int, error)
+	DescribeInstanceInfo(context.Context) (models.InstanceInfo, error)
+}
+
+type watchdogDeps struct {
+	now        func() time.Time
+	kill       func(int, syscall.Signal) error
+	probeEvery time.Duration
+	probeAfter time.Duration
+	probeTTL   time.Duration
+}
+
+func defaultWatchdogDeps() watchdogDeps {
+	return watchdogDeps{
+		now:        time.Now,
+		kill:       syscall.Kill,
+		probeEvery: 250 * time.Millisecond,
+		probeAfter: 3 * time.Second,
+		probeTTL:   300 * time.Millisecond,
+	}
+}
+
+func waitMachineWithWatchdog(ctx context.Context, s *session, timeout time.Duration, hook EventHook) error {
+	return waitMachineWithWatchdogDeps(ctx, s.machine, s.socketPath, timeout, hook, defaultWatchdogDeps())
+}
+
+func waitMachineWithWatchdogDeps(ctx context.Context, m watchdogMachine, socketPath string, timeout time.Duration, hook EventHook, deps watchdogDeps) error {
+	if timeout <= 0 {
+		return errors.New("waitMachine timeout must be > 0")
+	}
+	if deps.now == nil {
+		deps.now = time.Now
+	}
+	if deps.kill == nil {
+		deps.kill = syscall.Kill
+	}
+	if deps.probeEvery <= 0 {
+		deps.probeEvery = 250 * time.Millisecond
+	}
+	if deps.probeAfter <= 0 {
+		deps.probeAfter = 3 * time.Second
+	}
+	if deps.probeTTL <= 0 {
+		deps.probeTTL = 300 * time.Millisecond
+	}
+
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return s.machine.Wait(waitCtx)
+
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- m.Wait(waitCtx)
+	}()
+
+	started := deps.now()
+	ticker := time.NewTicker(deps.probeEvery)
+	defer ticker.Stop()
+	killed := false
+	for {
+		select {
+		case err := <-waitCh:
+			return err
+		case <-ticker.C:
+			if killed || deps.now().Sub(started) < deps.probeAfter {
+				continue
+			}
+			probeCtx, probeCancel := context.WithTimeout(context.Background(), deps.probeTTL)
+			_, probeErr := m.DescribeInstanceInfo(probeCtx)
+			probeCancel()
+			if probeErr == nil {
+				continue
+			}
+			pid, pidErr := m.PID()
+			if pidErr != nil || pid <= 0 {
+				continue
+			}
+			if err := deps.kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+				continue
+			}
+			killed = true
+			emitEvent(hook, "vm.watchdog.kill", map[string]any{
+				"pid":         pid,
+				"reason":      "wait_unresponsive",
+				"socket_path": socketPath,
+				"probe_error": probeErr.Error(),
+				"timeout_ms":  timeout.Milliseconds(),
+			})
+		}
+	}
 }
 
 func serialScript(command string) string {
@@ -714,7 +806,7 @@ func runWithRuntime(ctx context.Context, art Artifacts, runDir string, cfg RunCo
 			"error":    readyErr.Error(),
 		})
 		_ = s.machine.StopVMM()
-		waitErr := waitMachine(ctx, s, cfg.Timeout)
+		waitErr := waitMachineWithWatchdog(ctx, s, cfg.Timeout, cfg.EventHook)
 		exitPayload := map[string]any{}
 		if waitErr != nil {
 			exitPayload["wait_error"] = waitErr.Error()
@@ -744,7 +836,7 @@ func runWithRuntime(ctx context.Context, art Artifacts, runDir string, cfg RunCo
 	if cfg.AfterInject != nil {
 		if err := cfg.AfterInject(ctx); err != nil {
 			_ = s.machine.StopVMM()
-			_ = waitMachine(ctx, s, cfg.Timeout)
+			_ = waitMachineWithWatchdog(ctx, s, cfg.Timeout, cfg.EventHook)
 			emitEvent(cfg.EventHook, "vm.exit.observed", map[string]any{"wait_error": err.Error()})
 			serial := s.serialBuf.String()
 			emitSerialChunks(cfg.EventHook, serial, cfg.ChunkEventLimit, cfg.ChunkBytes)
@@ -756,7 +848,7 @@ func runWithRuntime(ctx context.Context, art Artifacts, runDir string, cfg RunCo
 
 	commandWaitErr := waitForExecCompletionLine(ctx, s.serialBuf, cfg.Timeout)
 	_ = s.machine.StopVMM()
-	waitErr := waitMachine(ctx, s, cfg.Timeout)
+	waitErr := waitMachineWithWatchdog(ctx, s, cfg.Timeout, cfg.EventHook)
 	exitPayload := map[string]any{}
 	if waitErr != nil {
 		exitPayload["wait_error"] = waitErr.Error()
@@ -984,7 +1076,7 @@ func ZygoteWithHook(ctx context.Context, art Artifacts, runDir, snapshotDir stri
 		return Outcome{}, "", "", fmt.Errorf("create snapshot: %w", err)
 	}
 	_ = s.machine.StopVMM()
-	waitErr := waitMachine(ctx, s, timeout)
+	waitErr := waitMachineWithWatchdog(ctx, s, timeout, hook)
 	exitPayload := map[string]any{}
 	if waitErr != nil {
 		exitPayload["wait_error"] = waitErr.Error()
@@ -1021,7 +1113,7 @@ func ResumeWithHook(ctx context.Context, art Artifacts, runDir, memPath, statePa
 		"command": "resume_noop_stop",
 	})
 	_ = s.machine.StopVMM()
-	waitErr := waitMachine(ctx, s, 2*time.Second)
+	waitErr := waitMachineWithWatchdog(ctx, s, 2*time.Second, hook)
 	exitPayload := map[string]any{}
 	if waitErr != nil {
 		exitPayload["wait_error"] = waitErr.Error()

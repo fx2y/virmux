@@ -6,8 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
+
+	models "github.com/firecracker-microvm/firecracker-go-sdk/client/models"
 )
 
 func TestLoadArtifactsRequiresFiles(t *testing.T) {
@@ -212,6 +216,81 @@ func TestExtractLostCounters(t *testing.T) {
 	}
 }
 
+func TestWaitMachineWithWatchdogKillsUnresponsiveMachine(t *testing.T) {
+	t.Parallel()
+	fm := &fakeWatchdogMachine{
+		pid:     4242,
+		waitErr: context.DeadlineExceeded,
+	}
+	var events []Event
+	var killed atomic.Bool
+	err := waitMachineWithWatchdogDeps(context.Background(), fm, "/tmp/fc.sock", 80*time.Millisecond, func(evt Event) {
+		events = append(events, evt)
+		if evt.Kind == "vm.watchdog.kill" {
+			fm.unblockWait()
+		}
+	}, watchdogDeps{
+		now: func() time.Time { return time.Now() },
+		kill: func(pid int, sig syscall.Signal) error {
+			if pid != 4242 || sig != syscall.SIGKILL {
+				t.Fatalf("unexpected kill pid=%d sig=%v", pid, sig)
+			}
+			killed.Store(true)
+			return nil
+		},
+		probeEvery: 5 * time.Millisecond,
+		probeAfter: 10 * time.Millisecond,
+		probeTTL:   5 * time.Millisecond,
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected wait deadline exceeded, got %v", err)
+	}
+	if !killed.Load() {
+		t.Fatalf("expected watchdog kill")
+	}
+	found := false
+	for _, evt := range events {
+		if evt.Kind != "vm.watchdog.kill" {
+			continue
+		}
+		found = true
+		if evt.Payload["reason"] != "wait_unresponsive" {
+			t.Fatalf("unexpected watchdog reason: %#v", evt.Payload["reason"])
+		}
+	}
+	if !found {
+		t.Fatalf("expected vm.watchdog.kill event")
+	}
+}
+
+func TestWaitMachineWithWatchdogSkipsKillWhenProbeHealthy(t *testing.T) {
+	t.Parallel()
+	fm := &fakeWatchdogMachine{
+		pid:      99,
+		waitErr:  context.DeadlineExceeded,
+		probeOK:  true,
+		waitDone: make(chan struct{}),
+	}
+	defer fm.unblockWait()
+	killCalled := false
+	err := waitMachineWithWatchdogDeps(context.Background(), fm, "/tmp/fc.sock", 40*time.Millisecond, nil, watchdogDeps{
+		now: func() time.Time { return time.Now() },
+		kill: func(pid int, sig syscall.Signal) error {
+			killCalled = true
+			return nil
+		},
+		probeEvery: 5 * time.Millisecond,
+		probeAfter: 10 * time.Millisecond,
+		probeTTL:   5 * time.Millisecond,
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected wait deadline exceeded, got %v", err)
+	}
+	if killCalled {
+		t.Fatalf("watchdog should not kill healthy probe")
+	}
+}
+
 type fakeBooter struct {
 	called bool
 	err    error
@@ -222,4 +301,49 @@ func (f *fakeBooter) Start(_ context.Context, req sessionBootRequest) (*session,
 	f.called = true
 	f.req = req
 	return nil, 0, f.err
+}
+
+type fakeWatchdogMachine struct {
+	pid      int
+	waitErr  error
+	probeOK  bool
+	waitDone chan struct{}
+}
+
+func (f *fakeWatchdogMachine) Wait(ctx context.Context) error {
+	if f.waitDone == nil {
+		f.waitDone = make(chan struct{})
+	}
+	select {
+	case <-ctx.Done():
+		if f.waitErr != nil {
+			return f.waitErr
+		}
+		return ctx.Err()
+	case <-f.waitDone:
+		if f.waitErr != nil {
+			return f.waitErr
+		}
+		return nil
+	}
+}
+
+func (f *fakeWatchdogMachine) PID() (int, error) { return f.pid, nil }
+
+func (f *fakeWatchdogMachine) DescribeInstanceInfo(context.Context) (models.InstanceInfo, error) {
+	if f.probeOK {
+		return models.InstanceInfo{}, nil
+	}
+	return models.InstanceInfo{}, errors.New("probe timeout")
+}
+
+func (f *fakeWatchdogMachine) unblockWait() {
+	if f.waitDone == nil {
+		return
+	}
+	select {
+	case <-f.waitDone:
+	default:
+		close(f.waitDone)
+	}
 }
