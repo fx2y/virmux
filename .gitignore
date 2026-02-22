@@ -1,0 +1,15 @@
+.cache/
+node_modules/
+runs/
+tmp/
+vm/snapshots/
+*.log
+
+.tmp
+
+# Spec filtering (intentional project structure)
+spec-*/
+!spec-0/
+spec-0/*
+!spec-0/01*
+!spec-0/00-learnings.jsonl

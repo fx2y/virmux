@@ -1,0 +1,128 @@
+[tools]
+go = "1.26.0"
+node = "22.17.1"
+
+[env]
+MISE_TASK_OUTPUT = "prefix"
+
+[tasks."host:deps"]
+description = "Install required Ubuntu host dependencies"
+run = "./scripts/host_deps.sh"
+sources = ["scripts/host_deps.sh"]
+outputs = ["tmp/host-deps.ok"]
+
+[tasks.doctor]
+description = "Hard-gate host and runtime prerequisites"
+run = "./scripts/doctor.sh"
+sources = ["scripts/doctor.sh", "scripts/common.sh"]
+outputs = ["tmp/doctor.ok"]
+
+[tasks."image:build"]
+description = "Build immutable image artifacts into cache by content hash"
+run = "./scripts/image_build.sh"
+sources = ["scripts/image_build.sh", "scripts/image_build_inner.sh", "scripts/common.sh", "vm/image-src/manifest.json"]
+outputs = [".cache/ghostfleet/images/.manifest-built"]
+
+[tasks."image:stamp"]
+description = "Write vm/images.lock from current content hash"
+depends = ["image:build"]
+run = [
+  "./scripts/image_stamp.sh"
+]
+sources = ["scripts/image_stamp.sh", "scripts/common.sh", "vm/image-src/manifest.json"]
+outputs = ["vm/images.lock", ".cache/ghostfleet/images/.manifest-built"]
+
+[tasks."vm:smoke"]
+description = "Boot a microVM, run uname/echo smoke path, persist trace+sqlite"
+depends = ["doctor", "image:stamp"]
+run = "./scripts/vm_smoke.sh"
+sources = ["scripts/vm_smoke.sh", "scripts/common.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock"]
+outputs = ["runs/.last-smoke", "runs/virmux.sqlite"]
+
+[tasks."vm:smoke:parallel"]
+description = "Run multiple smoke instances concurrently"
+depends = ["doctor", "image:stamp"]
+run = "MISE_JOBS=${MISE_JOBS:-$(nproc)} ./scripts/vm_smoke_parallel.sh"
+sources = ["scripts/vm_smoke_parallel.sh", "scripts/vm_smoke.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock"]
+outputs = ["runs/.last-smoke-parallel", "runs/virmux.sqlite"]
+
+[tasks."vm:zygote"]
+description = "Create pause snapshot for zygote-style resumes"
+depends = ["doctor", "image:stamp"]
+run = "./scripts/vm_zygote.sh"
+sources = ["scripts/vm_zygote.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock"]
+outputs = ["runs/.last-zygote"]
+
+[tasks."vm:resume"]
+description = "Resume VM from latest snapshot and run quick command"
+depends = ["doctor", "image:stamp"]
+run = "./scripts/vm_resume.sh"
+sources = ["scripts/vm_resume.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock"]
+outputs = ["runs/.last-resume", "runs/virmux.sqlite"]
+
+[tasks."bench:snapshot"]
+description = "Measure snapshot resume latency repeatedly"
+depends = ["vm:zygote"]
+run = "./scripts/bench_snapshot.sh"
+sources = ["scripts/bench_snapshot.sh", "scripts/vm_resume.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock"]
+outputs = ["runs/.last-bench-snapshot", "runs/virmux.sqlite"]
+
+[tasks."trace:validate"]
+description = "Validate trace JSONL schema contract"
+run = "./scripts/trace_validate.sh"
+sources = ["scripts/trace_validate.sh", "runs/*/trace.jsonl"]
+outputs = ["runs/.trace-validate.ok"]
+
+[tasks."db:check"]
+description = "Validate sqlite WAL/FK/index invariants"
+run = "./scripts/db_check.sh"
+sources = ["scripts/db_check.sh", "runs/virmux.sqlite"]
+outputs = ["runs/.db-check.ok"]
+
+[tasks."pw:install"]
+description = "Install node deps and Playwright browsers with cache"
+run = "./scripts/pw_install.sh"
+sources = ["package.json", "package-lock.json", "scripts/pw_install.sh"]
+outputs = [".cache/ms-playwright/.install-stamp", "node_modules/.package-lock.json"]
+
+[tasks."pw:smoke"]
+description = "Host-side Playwright chromium smoke"
+depends = ["pw:install"]
+run = "./scripts/pw_smoke.sh"
+sources = ["scripts/pw_smoke.sh", "scripts/pw_smoke.mjs", "package.json"]
+outputs = ["tmp/pw-smoke.ok"]
+
+[tasks."slack:fixture"]
+description = "Generate canonical Slack fixtures"
+run = "./scripts/slack_fixture.sh"
+sources = ["scripts/slack_fixture.sh"]
+outputs = ["fixtures/slack/url_verification.json", "fixtures/slack/message_event.json", "fixtures/slack/.fixture-stamp"]
+
+[tasks."slack:recv"]
+description = "Run local Slack receiver and replay fixtures"
+depends = ["slack:fixture"]
+run = "./scripts/slack_recv.sh"
+sources = ["scripts/slack_recv.sh", "fixtures/slack/*.json", "cmd/**/*.go", "internal/**/*.go"]
+outputs = ["tmp/slack-server.log", "runs/virmux.sqlite"]
+
+[tasks.fmt]
+description = "Format Go and JS"
+run = ["gofmt -w $(find cmd internal -name '*.go')", "npx prettier --write scripts/pw_smoke.mjs", "mkdir -p tmp && date -u +%Y-%m-%dT%H:%M:%SZ > tmp/fmt.ok"]
+sources = ["cmd/**/*.go", "internal/**/*.go", "scripts/pw_smoke.mjs"]
+outputs = ["tmp/fmt.ok"]
+
+[tasks.lint]
+description = "Static checks"
+run = ["go vet ./...", "date -u +%Y-%m-%dT%H:%M:%SZ > tmp/lint.ok"]
+sources = ["cmd/**/*.go", "internal/**/*.go", "scripts/pw_smoke.mjs"]
+outputs = ["tmp/lint.ok"]
+
+[tasks."test:unit"]
+description = "Unit test suite"
+run = ["go test ./...", "date -u +%Y-%m-%dT%H:%M:%SZ > tmp/test-unit.ok"]
+sources = ["cmd/**/*.go", "internal/**/*.go"]
+outputs = ["tmp/test-unit.ok"]
+
+[tasks."ci:fast"]
+description = "Fast local loop: fmt/lint/unit in parallel"
+run = "mise run fmt ::: lint ::: test:unit"

@@ -1,0 +1,1 @@
+{"token":"fixture-token","type":"event_callback","event":{"type":"message","channel":"C123","user":"U123","text":"hello virmux","ts":"1700000000.000100"}}

@@ -1,0 +1,16 @@
+{
+  "name": "virmux",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Firecracker harness task runner",
+  "engines": {
+    "node": "22.x"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.55.0",
+    "prettier": "3.6.2"
+  },
+  "scripts": {
+    "pw:smoke": "node scripts/pw_smoke.mjs"
+  }
+}
