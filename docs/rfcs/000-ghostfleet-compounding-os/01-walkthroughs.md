@@ -9,7 +9,7 @@ ghostfleet ab run experiments/dd-candidate-vs-main.yaml
 ghostfleet promote skill@candidate-sha
 ```
 Expected:
-- `runs/<rid>/trace.jsonl` valid
+- `runs/<rid>/trace.ndjson` valid (compat `trace.jsonl` symlink may exist)
 - `scores.pass=true` for promoted candidate
 - `promotions` has one row with reason payload
 

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -31,6 +32,9 @@ func (s *Server) ServeConn(ctx context.Context, rw io.ReadWriter) error {
 		}
 		frame, err := trpc.ReadFrame(rw)
 		if err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return nil
+			}
 			return err
 		}
 		var req proto.Request
@@ -41,7 +45,7 @@ func (s *Server) ServeConn(ctx context.Context, rw io.ReadWriter) error {
 		for _, name := range req.Allow {
 			allow[name] = struct{}{}
 		}
-		res := s.reg.Handle(ctx, tools.Call{ReqID: req.ReqID, Tool: req.Tool, Args: req.Args, Allow: allow, Base: "/data"})
+		res := s.reg.Handle(ctx, tools.Call{ReqID: req.ReqID, Tool: req.Tool, Args: req.Args, Allow: allow, Base: "/dev/virmux-data"})
 		body, err := json.Marshal(res)
 		if err != nil {
 			return err

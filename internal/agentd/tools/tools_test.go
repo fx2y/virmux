@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -25,6 +27,30 @@ func TestFSGuardNoLeak(t *testing.T) {
 	res := r.Handle(context.Background(), Call{ReqID: 1, Tool: "fs.write", Allow: allowAll(), Args: json.RawMessage(`{"path":"/etc/pwn","bytes":"x"}`), Base: t.TempDir()})
 	if res.OK || res.Error == nil || res.Error.Code != "DENIED" {
 		t.Fatalf("want DENIED got %+v", res)
+	}
+}
+
+func TestGuardDataPathRejectsSymlinkTraversal(t *testing.T) {
+	root := t.TempDir()
+	link := filepath.Join(root, "link")
+	if err := os.Symlink("/etc", link); err != nil {
+		t.Fatalf("symlink setup: %v", err)
+	}
+	_, err := guardDataPathWithRoot("/data/link/passwd", root, true)
+	if err == nil || err.Error() == "" {
+		t.Fatalf("expected symlink traversal denial, got err=%v", err)
+	}
+}
+
+func TestGuardDataPathAllowsCreateInsideDataRoot(t *testing.T) {
+	root := t.TempDir()
+	got, err := guardDataPathWithRoot("/data/new/dir/file.txt", root, true)
+	if err != nil {
+		t.Fatalf("expected allow create path, got %v", err)
+	}
+	want := filepath.Join(root, "new", "dir", "file.txt")
+	if got != want {
+		t.Fatalf("path mismatch got=%q want=%q", got, want)
 	}
 }
 

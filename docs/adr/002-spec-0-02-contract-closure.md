@@ -12,7 +12,7 @@ Adopt **7-plane contract**; reject convenience paths.
 
 1. Runtime plane: Ubuntu 24.04 bare-metal, `/dev/kvm` rw, Firecracker via go-sdk only.
 2. Image plane: lock-selected immutable cache dir `.cache/ghostfleet/images/<sha>/`; source bytes pinned+verified (`*_sha256`) and mixed into cache key.
-3. Run plane: host drives `ttyS0`; success markers `Linux` + `ok`; deterministic completion via host stop/wait.
+3. Run plane: host keeps bounded `ttyS0` for smoke/bridge; vsock is primary tool data plane; deterministic completion via host stop/wait.
 4. State plane: canonical agent metadata `agents/<id>.json`; mutable bytes only `volumes/<id>.ext4`; rootfs RO + `rootflags=noload`.
 5. Resume plane: attempt snapshot once; any resolve/load/wait fault => `StopVMM+Wait` then cold boot; terminal telemetry always non-null: `resume_mode`,`resume_source`,`resume_error`.
 6. Evidence plane: dual-write order fixed `trace emit -> sqlite insert`; trace append-only; sqlite WAL+FK+indexes; artifacts registry metadata-complete (regular file hash, non-regular `sha256=meta:*`).
@@ -37,7 +37,7 @@ flowchart TD
   B --> C[vm-run/smoke/zygote/resume]
   C --> D[state plane: agents.json + volumes.ext4]
   C --> E[events boundary + optional capped chunks]
-  E --> F[trace.jsonl append-only]
+  E --> F[trace.ndjson append-only (compat trace.jsonl symlink)]
   E --> G[sqlite runs/events/artifacts]
   C --> H[cleanup audit]
   H --> I[ship:core uncached cert cohort]
@@ -101,7 +101,7 @@ select path,sha256,bytes from artifacts where run_id=? order by id;
 ## Tradeoffs
 - Added strictness increases early red builds; intentionally prevents ambiguous green.
 - Cohort labels add operator burden; removes append-only DB ambiguity.
-- Optional lanes stay isolated; core contract remains serial-first deterministic.
+- Optional lanes stay isolated; core contract remains deterministic with vsock-first tool plane.
 
 ## Rejected alternatives
 - Container runtime substitution: violates host/runtime parity and KVM contract.

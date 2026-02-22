@@ -448,7 +448,12 @@ func extractZstdTar(bundlePath, dest string) error {
 				_ = cmd.Wait()
 				return err
 			}
-			if err := os.Symlink(hdr.Linkname, target); err != nil {
+			linkName, err := validateSymlinkTarget(dest, target, hdr.Linkname)
+			if err != nil {
+				_ = cmd.Wait()
+				return err
+			}
+			if err := os.Symlink(linkName, target); err != nil {
 				_ = cmd.Wait()
 				return err
 			}
@@ -472,6 +477,22 @@ func safeJoin(root, name string) (string, error) {
 		return "", fmt.Errorf("unsafe bundle path: %s", name)
 	}
 	return filepath.Join(root, clean), nil
+}
+
+func validateSymlinkTarget(root, linkPath, linkName string) (string, error) {
+	cleanRoot := filepath.Clean(root)
+	if filepath.IsAbs(linkName) {
+		return "", fmt.Errorf("unsafe symlink target: %s", linkName)
+	}
+	cleanLink := filepath.Clean(linkName)
+	if cleanLink == "." || cleanLink == "" {
+		return "", fmt.Errorf("unsafe symlink target: %s", linkName)
+	}
+	resolved := filepath.Clean(filepath.Join(filepath.Dir(linkPath), cleanLink))
+	if resolved != cleanRoot && !strings.HasPrefix(resolved, cleanRoot+string(filepath.Separator)) {
+		return "", fmt.Errorf("unsafe symlink target: %s", linkName)
+	}
+	return cleanLink, nil
 }
 
 func verifyManifest(stage string) error {

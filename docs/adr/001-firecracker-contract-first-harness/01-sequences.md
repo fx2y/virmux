@@ -15,7 +15,7 @@ sequenceDiagram
   G-->>H: ...Linux...
   G-->>H: ...ok...
   H->>F: SIGTERM (deterministic stop)
-  V->>S: persist run/events + trace jsonl
+  V->>S: persist run/events + trace.ndjson (compat trace.jsonl symlink)
   S-->>H: success
 ```
 

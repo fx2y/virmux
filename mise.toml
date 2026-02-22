@@ -33,7 +33,7 @@ outputs = ["tmp/doctor-socket-probe.ok"]
 [tasks."image:build"]
 description = "Build immutable image artifacts into cache by content hash"
 run = "./scripts/image_build.sh"
-sources = ["scripts/image_build.sh", "scripts/image_build_inner.sh", "scripts/common.sh", "vm/image-src/manifest.json"]
+sources = ["scripts/image_build.sh", "scripts/image_build_inner.sh", "scripts/common.sh", "vm/image-src/manifest.json", "cmd/virmux-agentd/**/*.go", "internal/agentd/**/*.go", "internal/transport/**/*.go", "go.mod", "go.sum"]
 outputs = [".cache/ghostfleet/images/.manifest-built"]
 
 [tasks."image:test:checksum-mismatch"]
@@ -48,7 +48,7 @@ depends = ["image:build"]
 run = [
   "./scripts/image_stamp.sh"
 ]
-sources = ["scripts/image_stamp.sh", "scripts/common.sh", "vm/image-src/manifest.json"]
+sources = ["scripts/image_stamp.sh", "scripts/common.sh", "vm/image-src/manifest.json", "cmd/virmux-agentd/**/*.go", "internal/agentd/**/*.go", "internal/transport/**/*.go", "go.mod", "go.sum"]
 outputs = ["vm/images.lock", ".cache/ghostfleet/images/.manifest-built"]
 
 [tasks."vm:smoke"]

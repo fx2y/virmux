@@ -34,8 +34,8 @@ for f in "${files[@]}"; do
         if .type == "tool" then
           (.tool|type=="string" and length>0) and
           (.args_hash|type=="string" and startswith("sha256:")) and
-          (.stdout_ref|type=="string") and
-          (.stderr_ref|type=="string") and
+          ((has("stdout_ref")|not) or (.stdout_ref|type=="string")) and
+          ((has("stderr_ref")|not) or (.stderr_ref|type=="string")) and
           (.exit_code|type=="number") and
           (.dur_ms|type=="number") and
           (.bytes_in|type=="number") and

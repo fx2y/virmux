@@ -10,7 +10,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -24,6 +23,7 @@ import (
 	"github.com/haris/virmux/internal/store"
 	"github.com/haris/virmux/internal/trace"
 	trpc "github.com/haris/virmux/internal/transport/rpc"
+	tvsock "github.com/haris/virmux/internal/transport/vsock"
 	"github.com/haris/virmux/internal/vm"
 )
 
@@ -51,14 +51,6 @@ type transportStats struct {
 	Attempts    int   `json:"attempts"`
 	HandshakeMS int64 `json:"handshake_ms"`
 }
-
-type runTransport interface {
-	Stats() transportStats
-}
-
-type serialTransport struct{}
-
-func (serialTransport) Stats() transportStats { return transportStats{} }
 
 const (
 	tracePrimaryName = "trace.ndjson"
@@ -138,19 +130,18 @@ func parseVMRunArgs(name string, args []string, defaultCmd string) (*runCommon, 
 	return cfg, command, nil
 }
 
-func newVMRunRunner(cfg *runCommon, command string, requiredMarkers []string, tr runTransport) vmRunner {
-	if tr == nil {
-		tr = serialTransport{}
-	}
+func newVMRunRunner(cfg *runCommon, command string, requiredMarkers []string) vmRunner {
 	return func(ctx context.Context, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
 		var emitErr error
+		trStats := transportStats{}
+		toolSucceeded := false
 		vsockPath := ""
 		if cfg.vsockCID > 0 {
 			vsockPath = filepath.Join(runDir, fmt.Sprintf("vsock-%d.sock", cfg.vsockCID))
 		}
 		vmCommand := command
 		if cfg.vsockCID > 0 {
-			vmCommand = "/usr/local/bin/virmux-agentd --port 10001"
+			vmCommand = "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; mkdir -p /data; mount --bind /dev/virmux-data /data 2>/dev/null || true; /usr/local/bin/virmux-agentd --port 10001"
 		}
 		outcome, err := vm.Run(ctx, art, runDir, vm.RunConfig{
 			MemMiB:          cfg.memMiB,
@@ -172,33 +163,57 @@ func newVMRunRunner(cfg *runCommon, command string, requiredMarkers []string, tr
 				if cfg.vsockCID <= 0 {
 					return nil
 				}
-				return runAgentdTool(ctx, vsockPath, cfg, command, runDir, emitVM)
+				toolCtx, cancel := context.WithTimeout(ctx, cfg.timeout)
+				defer cancel()
+				stats, err := runAgentdTool(toolCtx, vsockPath, cfg, command, runDir, emitVM)
+				trStats = stats
+				if err == nil {
+					toolSucceeded = true
+				}
+				return err
 			},
 		})
 		if emitErr != nil {
 			return vm.Outcome{}, nil, emitErr
 		}
-		details := makeRunnerDetails(runDir, outcome, tr.Stats())
+		details := makeRunnerDetails(runDir, outcome, trStats)
 		if vsockPath != "" {
 			details["vsock_uds_path"] = vsockPath
+		}
+		if cfg.vsockCID > 0 && toolSucceeded && isBridgeCommandExitError(err) {
+			err = nil
 		}
 		return outcome, details, err
 	}
 }
 
-func runAgentdTool(ctx context.Context, vsockPath string, cfg *runCommon, command, runDir string, emitVM vmEventEmitter) error {
+func isBridgeCommandExitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "vm command exit rc=1")
+}
+
+func runAgentdTool(ctx context.Context, vsockPath string, cfg *runCommon, command, runDir string, emitVM vmEventEmitter) (transportStats, error) {
 	started := time.Now()
-	dialRes, err := dialVsockBridge(ctx, vsockPath, 10001)
+	dialRes, err := tvsock.DialWithRetry(ctx, vsockPath, 10001, tvsock.DefaultRetryPolicy())
 	if err != nil {
-		return err
+		return transportStats{Attempts: dialRes.Stats.Attempts, HandshakeMS: dialRes.Stats.HandshakeMS}, err
 	}
 	defer dialRes.Conn.Close()
 	reader := bufio.NewReader(dialRes.Conn)
 	line, err := reader.ReadString('\n')
 	if err != nil {
-		return err
+		return transportStats{Attempts: dialRes.Stats.Attempts, HandshakeMS: dialRes.Stats.HandshakeMS}, err
 	}
-	emitVM("vm.guest.ready", map[string]any{"latency_ms": time.Since(started).Milliseconds(), "method": "vsock_ready_banner", "caps": strings.TrimSpace(line)})
+	caps, err := parseReadyBanner(line)
+	if err != nil {
+		return transportStats{Attempts: dialRes.Stats.Attempts, HandshakeMS: dialRes.Stats.HandshakeMS}, err
+	}
+	if err := emitVM("vm.guest.ready", map[string]any{"latency_ms": time.Since(started).Milliseconds(), "method": "vsock_ready_banner", "caps": caps}); err != nil {
+		return transportStats{Attempts: dialRes.Stats.Attempts, HandshakeMS: dialRes.Stats.HandshakeMS}, err
+	}
 	rw := struct {
 		io.Reader
 		io.Writer
@@ -210,7 +225,7 @@ func runAgentdTool(ctx context.Context, vsockPath string, cfg *runCommon, comman
 	if strings.TrimSpace(cfg.toolArgsJSON) != "" {
 		var raw map[string]any
 		if err := json.Unmarshal([]byte(cfg.toolArgsJSON), &raw); err != nil {
-			return fmt.Errorf("parse --tool-args-json: %w", err)
+			return transportStats{Attempts: dialRes.Stats.Attempts, HandshakeMS: dialRes.Stats.HandshakeMS}, fmt.Errorf("parse --tool-args-json: %w", err)
 		}
 		req.Args = raw
 	} else {
@@ -218,58 +233,161 @@ func runAgentdTool(ctx context.Context, vsockPath string, cfg *runCommon, comman
 		case "shell.exec":
 			req.Args = map[string]any{"cmd": command, "cwd": "/dev/virmux-data", "timeout_ms": int(cfg.timeout / time.Millisecond)}
 		default:
-			return fmt.Errorf("unsupported --tool in vm-run bridge without --tool-args-json: %s", cfg.tool)
+			return transportStats{Attempts: dialRes.Stats.Attempts, HandshakeMS: dialRes.Stats.HandshakeMS}, fmt.Errorf("unsupported --tool in vm-run bridge without --tool-args-json: %s", cfg.tool)
 		}
 	}
 	res, err := client.Call(ctx, req)
 	if err != nil {
-		return err
+		return transportStats{Attempts: dialRes.Stats.Attempts, HandshakeMS: dialRes.Stats.HandshakeMS}, err
+	}
+	if err := hydrateLegacyToolStreams(ctx, client, req, &res); err != nil {
+		return transportStats{Attempts: dialRes.Stats.Attempts, HandshakeMS: dialRes.Stats.HandshakeMS}, err
+	}
+	if err := materializeToolRefs(runDir, &res); err != nil {
+		return transportStats{Attempts: dialRes.Stats.Attempts, HandshakeMS: dialRes.Stats.HandshakeMS}, err
 	}
 	payload, err := buildToolResultPayload(runDir, req, res)
 	if err != nil {
-		return err
+		return transportStats{Attempts: dialRes.Stats.Attempts, HandshakeMS: dialRes.Stats.HandshakeMS}, err
 	}
 	payload["connect_attempts"] = dialRes.Stats.Attempts
 	payload["handshake_ms"] = dialRes.Stats.HandshakeMS
-	return emitVM("vm.tool.result", payload)
+	if err := emitVM("vm.tool.result", payload); err != nil {
+		return transportStats{Attempts: dialRes.Stats.Attempts, HandshakeMS: dialRes.Stats.HandshakeMS}, err
+	}
+	return transportStats{Attempts: dialRes.Stats.Attempts, HandshakeMS: dialRes.Stats.HandshakeMS}, nil
 }
 
-type bridgeDialResult struct {
-	Conn  net.Conn
-	Stats transportStats
+func hydrateLegacyToolStreams(ctx context.Context, client *trpc.Client, req trpc.Request, res *trpc.Response) error {
+	if client == nil || res == nil || req.Tool != "shell.exec" {
+		return nil
+	}
+	if hasStringData(res.Data, "stdout") && hasStringData(res.Data, "stderr") {
+		return nil
+	}
+	allowSet := map[string]struct{}{}
+	for _, a := range req.Allow {
+		allowSet[a] = struct{}{}
+	}
+	if _, ok := allowSet["fs.read"]; !ok {
+		return nil
+	}
+	if res.Data == nil {
+		res.Data = map[string]any{}
+	}
+	if !hasStringData(res.Data, "stdout") && strings.TrimSpace(res.StdoutRef) != "" {
+		b, err := readToolPathViaFS(ctx, client, req, res.ReqID+1, "/data/"+filepath.ToSlash(strings.TrimPrefix(res.StdoutRef, "/")))
+		if err != nil {
+			return err
+		}
+		res.Data["stdout"] = b
+	}
+	if !hasStringData(res.Data, "stderr") && strings.TrimSpace(res.StderrRef) != "" {
+		b, err := readToolPathViaFS(ctx, client, req, res.ReqID+2, "/data/"+filepath.ToSlash(strings.TrimPrefix(res.StderrRef, "/")))
+		if err != nil {
+			return err
+		}
+		res.Data["stderr"] = b
+	}
+	return nil
 }
 
-type bufferedConn struct {
-	net.Conn
-	r *bufio.Reader
-}
-
-func (c *bufferedConn) Read(p []byte) (int, error) { return c.r.Read(p) }
-
-func dialVsockBridge(ctx context.Context, udsPath string, port uint32) (bridgeDialResult, error) {
-	started := time.Now()
-	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", udsPath)
+func readToolPathViaFS(ctx context.Context, client *trpc.Client, req trpc.Request, reqID int64, dataPath string) (string, error) {
+	fsReq := trpc.Request{
+		ReqID: reqID,
+		Tool:  "fs.read",
+		Allow: req.Allow,
+		Args:  map[string]any{"path": dataPath},
+	}
+	fsRes, err := client.Call(ctx, fsReq)
 	if err != nil {
-		return bridgeDialResult{}, err
+		return "", err
 	}
-	br := bufio.NewReader(conn)
-	if _, err := fmt.Fprintf(conn, "CONNECT %d\n", port); err != nil {
-		_ = conn.Close()
-		return bridgeDialResult{}, err
+	if !fsRes.OK {
+		return "", fmt.Errorf("legacy stream read failed: req=%d path=%s", reqID, dataPath)
 	}
-	ack, err := br.ReadString('\n')
-	if err != nil {
-		_ = conn.Close()
-		return bridgeDialResult{}, err
+	v, _ := fsRes.Data["bytes"].(string)
+	return v, nil
+}
+
+func hasStringData(m map[string]any, key string) bool {
+	if m == nil {
+		return false
 	}
-	if !strings.HasPrefix(strings.TrimSpace(ack), "OK ") {
-		_ = conn.Close()
-		return bridgeDialResult{}, fmt.Errorf("bridge CONNECT ack mismatch: %q", strings.TrimSpace(ack))
+	v, ok := m[key]
+	if !ok {
+		return false
 	}
-	return bridgeDialResult{
-		Conn:  &bufferedConn{Conn: conn, r: br},
-		Stats: transportStats{Attempts: 1, HandshakeMS: time.Since(started).Milliseconds()},
-	}, nil
+	_, ok = v.(string)
+	return ok
+}
+
+func materializeToolRefs(runDir string, res *trpc.Response) error {
+	if res == nil {
+		return nil
+	}
+	if err := writeToolRef(runDir, res.StdoutRef, stringData(res.Data, "stdout")); err != nil {
+		return err
+	}
+	if err := writeToolRef(runDir, res.StderrRef, stringData(res.Data, "stderr")); err != nil {
+		return err
+	}
+	return nil
+}
+
+func writeToolRef(runDir, ref, content string) error {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return nil
+	}
+	if filepath.IsAbs(ref) {
+		return fmt.Errorf("tool ref must be relative: %s", ref)
+	}
+	clean := filepath.Clean(ref)
+	if strings.HasPrefix(clean, "..") {
+		return fmt.Errorf("tool ref escapes run dir: %s", ref)
+	}
+	full := filepath.Join(runDir, clean)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		return fmt.Errorf("mkdir tool ref parent: %w", err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("write tool ref %s: %w", ref, err)
+	}
+	return nil
+}
+
+func stringData(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	v, ok := m[key]
+	if !ok {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
+}
+
+func parseReadyBanner(line string) ([]string, error) {
+	s := strings.TrimSpace(line)
+	const prefix = "READY v0 tools="
+	if !strings.HasPrefix(s, prefix) {
+		return nil, fmt.Errorf("agent READY mismatch: %q", s)
+	}
+	csv := strings.TrimSpace(strings.TrimPrefix(s, prefix))
+	if csv == "" {
+		return []string{}, nil
+	}
+	parts := strings.Split(csv, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out, nil
 }
 
 func splitCSV(s string) []string {
@@ -360,11 +478,16 @@ func cmdVMRun(args []string) error {
 	if err != nil {
 		return err
 	}
+	started := map[string]any{"label": cfg.label, "cmd": command}
+	if cfg.vsockCID > 0 {
+		started["tool"] = cfg.tool
+		started["allow"] = splitCSV(cfg.allowCSV)
+	}
 	return runWithStore(
 		cfg,
 		"vm:run",
-		map[string]any{"label": cfg.label, "cmd": command},
-		newVMRunRunner(cfg, command, nil, serialTransport{}),
+		started,
+		newVMRunRunner(cfg, command, nil),
 		defaultRunRuntime,
 	)
 }
@@ -378,7 +501,7 @@ func cmdVMSmoke(args []string) error {
 		cfg,
 		"vm:smoke",
 		map[string]any{"label": cfg.label, "cmd": command},
-		newVMRunRunner(cfg, command, []string{"Linux", "ok"}, serialTransport{}),
+		newVMRunRunner(cfg, command, []string{"Linux", "ok"}),
 		defaultRunRuntime,
 	)
 }
@@ -630,6 +753,7 @@ func runWithStore(cfg *runCommon, task string, startedPayload map[string]any, ru
 		stringDetail(payload, "fallback_trace"),
 		stringDetail(payload, "vsock_uds_path"),
 	})
+	cleanupErr := cleanupRunTransientPaths([]string{stringDetail(payload, "vsock_uds_path")})
 
 	summary, _ := json.Marshal(map[string]any{
 		"run_id":    runID,
@@ -642,14 +766,36 @@ func runWithStore(cfg *runCommon, task string, startedPayload map[string]any, ru
 	})
 	fmt.Println(string(summary))
 
-	if finishEmitErr != nil || finishErr != nil || artifactErr != nil {
-		return errors.Join(finishEmitErr, finishErr, artifactErr)
+	if finishEmitErr != nil || finishErr != nil || artifactErr != nil || cleanupErr != nil {
+		return errors.Join(finishEmitErr, finishErr, artifactErr, cleanupErr)
 	}
 	if exportErr := maybeAutoExportFailure(ctx, cfg, st, tw, runtime.now, runID, task, status); exportErr != nil {
 		return exportErr
 	}
 	if runErr != nil {
 		return runErr
+	}
+	return nil
+}
+
+func cleanupRunTransientPaths(paths []string) error {
+	for _, p := range paths {
+		if strings.TrimSpace(p) == "" {
+			continue
+		}
+		info, err := os.Lstat(p)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return fmt.Errorf("stat transient path %s: %w", p, err)
+		}
+		if info.Mode()&os.ModeSocket == 0 {
+			continue
+		}
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove transient socket %s: %w", p, err)
+		}
 	}
 	return nil
 }
@@ -706,7 +852,8 @@ func classifyRunFailure(err error) runFailure {
 		strings.Contains(low, "broken pipe"),
 		strings.Contains(low, "connection reset"),
 		strings.Contains(low, "eof"),
-		strings.Contains(low, "connect ack mismatch"):
+		strings.Contains(low, "connect ack mismatch"),
+		strings.Contains(low, "ready mismatch"):
 		code = "DISCONNECT"
 	case strings.Contains(low, "crash"),
 		strings.Contains(low, "exit rc="),

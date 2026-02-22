@@ -82,7 +82,7 @@ func (shellRunner) Run(ctx context.Context, c Call) proto.Response {
 	}
 	cmdCtx, cancel := context.WithTimeout(ctx, time.Duration(a.TimeoutMS)*time.Millisecond)
 	defer cancel()
-	cmd := exec.CommandContext(cmdCtx, "sh", "-lc", a.Cmd)
+	cmd := exec.CommandContext(cmdCtx, "/bin/sh", "-lc", a.Cmd)
 	if a.Cwd != "" {
 		cmd.Dir = a.Cwd
 	}
@@ -92,11 +92,20 @@ func (shellRunner) Run(ctx context.Context, c Call) proto.Response {
 	start := time.Now()
 	err := cmd.Run()
 	dur := time.Since(start).Milliseconds()
-	stdoutRef, stderrRef, refs, hash, werr := writeOutputs(c.Base, c.ReqID, outb.String(), errb.String())
-	if werr != nil {
-		return errResp(c.ReqID, "INTERNAL", werr.Error())
+	stdout := outb.String()
+	stderr := errb.String()
+	stdoutRef, stderrRef, refs, hash := outputRefsAndHash(c.ReqID, stdout, stderr)
+	res := proto.Response{
+		ReqID:        c.ReqID,
+		OK:           err == nil,
+		RC:           0,
+		StdoutRef:    stdoutRef,
+		StderrRef:    stderrRef,
+		OHHash:       hash,
+		DurMS:        dur,
+		ArtifactRefs: refs,
+		Data:         map[string]any{"stdout": stdout, "stderr": stderr},
 	}
-	res := proto.Response{ReqID: c.ReqID, OK: err == nil, RC: 0, StdoutRef: stdoutRef, StderrRef: stderrRef, OHHash: hash, DurMS: dur, ArtifactRefs: refs}
 	if err != nil {
 		if errors.Is(cmdCtx.Err(), context.DeadlineExceeded) {
 			res.Error = &proto.Error{Code: "TIMEOUT", Msg: err.Error(), Retryable: false, ReqID: c.ReqID}
@@ -124,7 +133,7 @@ func (fsReadRunner) Run(ctx context.Context, c Call) proto.Response {
 	if err := json.Unmarshal(c.Args, &a); err != nil {
 		return errResp(c.ReqID, "INTERNAL", err.Error())
 	}
-	p, derr := guardDataPath(a.Path)
+	p, derr := guardDataPath(a.Path, false)
 	if derr != nil {
 		return errResp(c.ReqID, "DENIED", derr.Error())
 	}
@@ -147,7 +156,7 @@ func (fsWriteRunner) Run(ctx context.Context, c Call) proto.Response {
 	if err := json.Unmarshal(c.Args, &a); err != nil {
 		return errResp(c.ReqID, "INTERNAL", err.Error())
 	}
-	p, derr := guardDataPath(a.Path)
+	p, derr := guardDataPath(a.Path, true)
 	if derr != nil {
 		return errResp(c.ReqID, "DENIED", derr.Error())
 	}
@@ -204,9 +213,16 @@ func (h httpRunner) Run(ctx context.Context, c Call) proto.Response {
 	return proto.Response{ReqID: c.ReqID, OK: true, DurMS: dur, OHHash: sha256Hex(body), Data: map[string]any{"status": resp.StatusCode, "body": string(body)}}
 }
 
-func guardDataPath(p string) (string, error) {
+func guardDataPath(p string, allowCreate bool) (string, error) {
+	return guardDataPathWithRoot(p, "/dev/virmux-data", allowCreate)
+}
+
+func guardDataPathWithRoot(p, hostRoot string, allowCreate bool) (string, error) {
 	if strings.TrimSpace(p) == "" {
 		return "", fmt.Errorf("path empty")
+	}
+	if strings.TrimSpace(hostRoot) == "" {
+		return "", fmt.Errorf("path denied: empty host root")
 	}
 	clean := filepath.Clean(p)
 	if !filepath.IsAbs(clean) {
@@ -216,29 +232,83 @@ func guardDataPath(p string) (string, error) {
 		return clean, fmt.Errorf("path denied: %s", clean)
 	}
 	if clean == "/data" {
-		return "/dev/virmux-data", nil
+		if err := denySymlinkComponents(hostRoot, hostRoot, allowCreate); err != nil {
+			return "", err
+		}
+		return hostRoot, nil
 	}
-	return filepath.Join("/dev/virmux-data", strings.TrimPrefix(clean, "/data/")), nil
+	hostPath := filepath.Join(hostRoot, strings.TrimPrefix(clean, "/data/"))
+	if err := denySymlinkComponents(hostRoot, hostPath, allowCreate); err != nil {
+		return "", err
+	}
+	return hostPath, nil
 }
 
-func writeOutputs(base string, reqID int64, stdout, stderr string) (string, string, []string, string, error) {
-	if strings.TrimSpace(base) == "" {
-		base = "/tmp"
+func denySymlinkComponents(root, target string, allowCreate bool) error {
+	rootClean := filepath.Clean(root)
+	targetClean := filepath.Clean(target)
+	if !filepath.IsAbs(rootClean) || !filepath.IsAbs(targetClean) {
+		return fmt.Errorf("path denied: non-absolute root/target")
 	}
-	adir := filepath.Join(base, "artifacts")
-	if err := os.MkdirAll(adir, 0o755); err != nil {
-		return "", "", nil, "", err
+	if targetClean != rootClean && !strings.HasPrefix(targetClean, rootClean+string(filepath.Separator)) {
+		return fmt.Errorf("path denied: %s", targetClean)
 	}
+	if err := denyIfSymlink(rootClean); err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(rootClean, targetClean)
+	if err != nil {
+		return fmt.Errorf("path denied: %w", err)
+	}
+	if rel == "." {
+		return nil
+	}
+	cur := rootClean
+	parts := strings.Split(rel, string(filepath.Separator))
+	for i, part := range parts {
+		if part == "" || part == "." {
+			continue
+		}
+		cur = filepath.Join(cur, part)
+		info, err := os.Lstat(cur)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				if allowCreate {
+					return nil
+				}
+				return err
+			}
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("path denied: symlink component %s", cur)
+		}
+		if i < len(parts)-1 && !info.IsDir() {
+			return fmt.Errorf("path denied: non-directory component %s", cur)
+		}
+	}
+	return nil
+}
+
+func denyIfSymlink(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("path denied: symlink component %s", path)
+	}
+	return nil
+}
+
+func outputRefsAndHash(reqID int64, stdout, stderr string) (string, string, []string, string) {
 	outRel := fmt.Sprintf("artifacts/%d.out", reqID)
 	errRel := fmt.Sprintf("artifacts/%d.err", reqID)
-	if err := os.WriteFile(filepath.Join(base, outRel), []byte(stdout), 0o644); err != nil {
-		return "", "", nil, "", err
-	}
-	if err := os.WriteFile(filepath.Join(base, errRel), []byte(stderr), 0o644); err != nil {
-		return "", "", nil, "", err
-	}
 	combined := append([]byte(stdout), []byte(stderr)...)
-	return outRel, errRel, []string{outRel, errRel}, sha256Hex(combined), nil
+	return outRel, errRel, []string{outRel, errRel}, sha256Hex(combined)
 }
 
 func sha256Hex(b []byte) string {

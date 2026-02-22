@@ -35,7 +35,7 @@ operator(cli/tui)
     -> vmctl(firecracker,qemu-fallback)
       -> guest-runtime(tool rpc)
     -> store(sqlite)
-    -> trace(jsonl/artifacts)
+    -> trace(ndjson/artifacts)
     -> judge(rubric engine + model adapters)
     -> slack gateway(events + speak gate)
     -> mcp gateway(client+server)
@@ -43,7 +43,7 @@ operator(cli/tui)
 repo/
   skills/<name>/{prompt.md,tools.yaml,rubric.yaml,tests/*}
   roles/<role>.yaml
-  runs/<run_id>/{trace.jsonl,stdout,artifacts/*}
+  runs/<run_id>/{trace.ndjson,stdout,artifacts/*}
   agents/<id>.json
   vm/images.lock
 ```
@@ -135,7 +135,7 @@ Success: quality up, wall-clock down with `N` until host saturation.
 ```bash
 ghostfleet doctor
 ghostfleet vm run --cmd 'uname -a && echo ok'
-# expect: run row + trace.jsonl + stdout artifact
+# expect: run row + trace.ndjson (compat trace.jsonl symlink may exist) + stdout artifact
 ```
 ### B. “Skill loop”
 ```bash

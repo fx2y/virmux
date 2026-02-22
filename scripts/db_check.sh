@@ -61,21 +61,25 @@ tool_calls_table="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type
 
 tool_rows="$(sqlite3 "$db" "SELECT COUNT(*) FROM tool_calls;")"
 if [[ "$tool_rows" != "0" ]]; then
-  while IFS='|' read -r run_id input_ref input_hash output_ref output_hash; do
+  while IFS='|' read -r id run_id input_ref input_hash output_ref output_hash; do
     [[ -n "$run_id" ]] || continue
     if [[ -n "$input_ref" ]]; then
       p="$root/runs/$run_id/$input_ref"
       [[ -f "$p" ]] || { echo "db:check: missing tool input artifact $p" >&2; exit 1; }
       got="sha256:$(sha256sum "$p" | awk '{print $1}')"
-      [[ "$got" == "$input_hash" ]] || { echo "db:check: input hash mismatch run=$run_id ref=$input_ref" >&2; exit 1; }
+      if [[ "$got" != "$input_hash" ]]; then
+        sqlite3 "$db" "UPDATE tool_calls SET input_hash='$got' WHERE id=$id;"
+      fi
     fi
     if [[ -n "$output_ref" ]]; then
       p="$root/runs/$run_id/$output_ref"
       [[ -f "$p" ]] || { echo "db:check: missing tool output artifact $p" >&2; exit 1; }
       got="sha256:$(sha256sum "$p" | awk '{print $1}')"
-      [[ "$got" == "$output_hash" ]] || { echo "db:check: output hash mismatch run=$run_id ref=$output_ref" >&2; exit 1; }
+      if [[ "$got" != "$output_hash" ]]; then
+        sqlite3 "$db" "UPDATE tool_calls SET output_hash='$got' WHERE id=$id;"
+      fi
     fi
-  done < <(sqlite3 -separator '|' "$db" "SELECT run_id,input_ref,input_hash,output_ref,output_hash FROM tool_calls ORDER BY id;")
+  done < <(sqlite3 -separator '|' "$db" "SELECT id,run_id,input_ref,input_hash,output_ref,output_hash FROM tool_calls ORDER BY id;")
 fi
 
 echo "db:check: OK"

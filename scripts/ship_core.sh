@@ -16,6 +16,10 @@ mise run ci:fast
 ./scripts/test_image_checksum_mismatch.sh
 ./scripts/vm_boot_contract.sh
 ./scripts/vm_vsock_chaos.sh
+./scripts/vm_test_tool_shell.sh
+./scripts/vm_test_tool_fs.sh
+./scripts/vm_test_no_leak.sh
+./scripts/vm_test_tool_http.sh
 ./scripts/vm_smoke.sh --label "$cert_tag-smoke"
 ./scripts/test_vm_agent_persistence.sh
 ./scripts/test_vm_resume_fallback_no_snapshot.sh
@@ -25,6 +29,7 @@ mise run ci:fast
 ./scripts/bench_snapshot.sh
 ./scripts/trace_validate.sh
 ./scripts/db_check.sh
+./scripts/vm_test_export_roundtrip.sh
 ./scripts/vm_test_watchdog.sh
 ./scripts/vm_test_crash_partial_export.sh
 VIRMUX_CERT_LABEL_GLOB="$cert_tag-%" ./scripts/sql_cert_contract.sh

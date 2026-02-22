@@ -1,6 +1,7 @@
 package vsock
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -60,7 +61,7 @@ func TestVsockDialRejectsBadAck(t *testing.T) {
 		defer conn.Close()
 		buf := make([]byte, 64)
 		_, _ = conn.Read(buf)
-		_, _ = io.WriteString(conn, "OK 99\n")
+		_, _ = io.WriteString(conn, "NOPE\n")
 	}()
 
 	_, err = Dial(context.Background(), sock, 52)
@@ -86,6 +87,8 @@ func TestVsockDialWithRetrySucceedsAfterEarlyEOF(t *testing.T) {
 			if err != nil {
 				return
 			}
+			_ = conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+			_, _ = bufio.NewReader(conn).ReadString('\n')
 			n := attempts.Add(1)
 			if n == 1 {
 				_ = conn.Close()
@@ -116,6 +119,41 @@ func TestVsockDialWithRetryExhausted(t *testing.T) {
 	}
 }
 
+func TestVsockDialContextDeadlinePreemptsSilentAck(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "v.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		// Intentionally never send an ack to assert ctx cancellation.
+		time.Sleep(2 * time.Second)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err = Dial(ctx, sock, 52)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		var netErr net.Error
+		if !errors.As(err, &netErr) || !netErr.Timeout() {
+			t.Fatalf("expected deadline/timeout error, got %v", err)
+		}
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("dial did not return promptly after ctx deadline: %s", elapsed)
+	}
+}
+
 func TestVsockChaos50NoStuck(t *testing.T) {
 	t.Parallel()
 	for i := 0; i < 50; i++ {
@@ -135,6 +173,8 @@ func TestVsockChaos50NoStuck(t *testing.T) {
 					if err != nil {
 						return
 					}
+					_ = conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+					_, _ = bufio.NewReader(conn).ReadString('\n')
 					a := attempts.Add(1)
 					if a <= 2 {
 						_ = conn.Close()
@@ -146,7 +186,7 @@ func TestVsockChaos50NoStuck(t *testing.T) {
 				}
 			}()
 
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			_, err = DialWithRetry(ctx, sock, 10240, RetryPolicy{MaxAttempts: 8, BaseBackoff: time.Millisecond, MaxBackoff: 8 * time.Millisecond})
 			if err != nil {

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	firecracker "github.com/firecracker-microvm/firecracker-go-sdk"
 	models "github.com/firecracker-microvm/firecracker-go-sdk/client/models"
 )
 
@@ -288,6 +289,82 @@ func TestWaitMachineWithWatchdogSkipsKillWhenProbeHealthy(t *testing.T) {
 	}
 	if killCalled {
 		t.Fatalf("watchdog should not kill healthy probe")
+	}
+}
+
+func TestResumeWithHookReturnsWaitError(t *testing.T) {
+	origStart := startSessionFn
+	origStop := stopVMMFn
+	origWait := waitMachineWithWatchdogFn
+	origSleep := sleepFn
+	origAlive := processAliveFn
+	t.Cleanup(func() {
+		startSessionFn = origStart
+		stopVMMFn = origStop
+		waitMachineWithWatchdogFn = origWait
+		sleepFn = origSleep
+		processAliveFn = origAlive
+	})
+
+	startSessionFn = func(_ context.Context, _ Artifacts, _ string, _ int64, _ string, _ *firecracker.SnapshotConfig, _ *firecracker.VsockDevice, _ EventHook) (*session, int64, error) {
+		return &session{
+			serialBuf: &safeBuffer{},
+			pipes:     &sessionPipes{},
+		}, 42, nil
+	}
+	stopVMMFn = func(*session) error { return nil }
+	waitMachineWithWatchdogFn = func(context.Context, *session, time.Duration, EventHook) error {
+		return context.DeadlineExceeded
+	}
+	sleepFn = func(time.Duration) {}
+	processAliveFn = func(int) bool { return true }
+
+	var events []Event
+	outcome, err := ResumeWithHook(context.Background(), Artifacts{}, t.TempDir(), "/tmp/mem", "/tmp/state", 128, time.Second, "", func(evt Event) {
+		events = append(events, evt)
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected wait error, got %v", err)
+	}
+	if outcome.ResumeMS != 42 {
+		t.Fatalf("expected ResumeMS=42 got %d", outcome.ResumeMS)
+	}
+	found := false
+	for _, evt := range events {
+		if evt.Kind != "vm.exit.observed" {
+			continue
+		}
+		if evt.Payload["wait_error"] != context.DeadlineExceeded.Error() {
+			t.Fatalf("expected wait_error payload, got %#v", evt.Payload["wait_error"])
+		}
+		found = true
+	}
+	if !found {
+		t.Fatalf("expected vm.exit.observed event")
+	}
+}
+
+func TestNormalizeResumeWaitErrIgnoresDeadlineWhenProcessExited(t *testing.T) {
+	origAlive := processAliveFn
+	t.Cleanup(func() { processAliveFn = origAlive })
+	processAliveFn = func(int) bool { return false }
+	err := normalizeResumeWaitErr(context.DeadlineExceeded, func() (int, error) {
+		return 77, nil
+	})
+	if err != nil {
+		t.Fatalf("expected nil error when process already exited, got %v", err)
+	}
+}
+
+func TestNormalizeResumeWaitErrKeepsDeadlineWhenProcessAlive(t *testing.T) {
+	origAlive := processAliveFn
+	t.Cleanup(func() { processAliveFn = origAlive })
+	processAliveFn = func(int) bool { return true }
+	err := normalizeResumeWaitErr(context.DeadlineExceeded, func() (int, error) {
+		return 88, nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline error, got %v", err)
 	}
 }
 

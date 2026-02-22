@@ -12,7 +12,7 @@ rm -f "$report"
 
 go test ./internal/transport/... -run Vsock -count=1
 
-go run ./cmd/virmux vm-run --label "$label" --cmd "echo ok"
+go run ./cmd/virmux vm-run --label "$label" --vsock-cid 3 --tool shell.exec --cmd "echo ok"
 
 run_id="$(sqlite3 "$root/runs/virmux.sqlite" "
 SELECT id FROM runs
@@ -47,8 +47,21 @@ if [[ "$connect_attempts" -lt 0 ]]; then
   echo "vm:vsock:chaos: run.finished missing connect_attempts" >&2
   exit 1
 fi
+if [[ "$connect_attempts" -lt 1 ]]; then
+  echo "vm:vsock:chaos: expected connect_attempts>=1 on vsock lane, got $connect_attempts" >&2
+  exit 1
+fi
 if [[ "$handshake_p95" -gt 2000 ]]; then
   echo "vm:vsock:chaos: handshake p95 too high: $handshake_p95 ms" >&2
+  exit 1
+fi
+trace="$root/runs/$run_id/trace.ndjson"
+if [[ ! -f "$trace" ]]; then
+  echo "vm:vsock:chaos: trace missing at $trace" >&2
+  exit 1
+fi
+if ! jq -e 'select(.event=="vm.tool.result")' "$trace" >/dev/null; then
+  echo "vm:vsock:chaos: vm.tool.result missing for $run_id" >&2
   exit 1
 fi
 

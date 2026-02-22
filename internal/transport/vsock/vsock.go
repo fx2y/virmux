@@ -49,15 +49,14 @@ func Dial(ctx context.Context, udsPath string, port uint32) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	ack, err := sendConnectAndReadAck(conn, port)
+	ack, err := sendConnectAndReadAck(ctx, conn, port)
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
-	want := fmt.Sprintf("OK %d", port)
-	if ack != want {
+	if !strings.HasPrefix(ack, "OK ") {
 		_ = conn.Close()
-		return nil, fmt.Errorf("%w: got=%q want=%q", ErrConnectAck, ack, want)
+		return nil, fmt.Errorf("%w: got=%q want_prefix=%q", ErrConnectAck, ack, "OK ")
 	}
 	return conn, nil
 }
@@ -76,7 +75,9 @@ func DialWithRetry(ctx context.Context, udsPath string, port uint32, policy Retr
 	started := time.Now()
 	var lastErr error
 	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
-		conn, err := Dial(ctx, udsPath, port)
+		attemptCtx, cancel := dialAttemptContext(ctx)
+		conn, err := Dial(attemptCtx, udsPath, port)
+		cancel()
 		if err == nil {
 			return DialResult{Conn: conn, Stats: Stats{Attempts: attempt, HandshakeMS: time.Since(started).Milliseconds()}}, nil
 		}
@@ -94,15 +95,49 @@ func DialWithRetry(ctx context.Context, udsPath string, port uint32, policy Retr
 	return DialResult{Stats: Stats{Attempts: policy.MaxAttempts, HandshakeMS: time.Since(started).Milliseconds()}}, fmt.Errorf("%w: attempts=%d last=%v", ErrRetryExhausted, policy.MaxAttempts, lastErr)
 }
 
-func sendConnectAndReadAck(conn net.Conn, port uint32) (string, error) {
+func dialAttemptContext(parent context.Context) (context.Context, context.CancelFunc) {
+	const maxAttempt = 2 * time.Second
+	if err := parent.Err(); err != nil {
+		return parent, func() {}
+	}
+	if deadline, ok := parent.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return parent, func() {}
+		}
+		if remaining < maxAttempt {
+			return context.WithTimeout(parent, remaining)
+		}
+	}
+	return context.WithTimeout(parent, maxAttempt)
+}
+
+func sendConnectAndReadAck(ctx context.Context, conn net.Conn, port uint32) (string, error) {
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+		defer func() { _ = conn.SetDeadline(time.Time{}) }()
+	}
 	if _, err := fmt.Fprintf(conn, "CONNECT %d\n", port); err != nil {
 		return "", err
 	}
-	ack, err := bufio.NewReader(conn).ReadString('\n')
-	if err != nil {
-		return "", err
+	type ackResult struct {
+		ack string
+		err error
 	}
-	return strings.TrimSpace(ack), nil
+	done := make(chan ackResult, 1)
+	go func() {
+		ack, err := bufio.NewReader(conn).ReadString('\n')
+		done <- ackResult{ack: ack, err: err}
+	}()
+	select {
+	case res := <-done:
+		if res.err != nil {
+			return "", res.err
+		}
+		return strings.TrimSpace(res.ack), nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
 }
 
 func isRetryable(err error) bool {
@@ -112,8 +147,11 @@ func isRetryable(err error) bool {
 	if errors.Is(err, ErrConnectAck) {
 		return false
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.Canceled) {
 		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
 	}
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true

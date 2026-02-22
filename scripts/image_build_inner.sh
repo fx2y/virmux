@@ -21,6 +21,8 @@ if [[ -f "$out_dir/.complete" ]]; then
 fi
 
 workdir="$(mktemp -d "$root/tmp/image-build.XXXXXX")"
+source_cache_dir="$root/.cache/ghostfleet/sources"
+fetch_timeout_sec="${VIRMUX_IMAGE_FETCH_TIMEOUT_SEC:-900}"
 cleanup() {
   rm -rf "$workdir"
 }
@@ -39,11 +41,42 @@ for required in "$kernel_expected_sha" "$rootfs_expected_sha" "$firecracker_expe
     echo "manifest requires kernel_sha256/rootfs_squashfs_sha256/firecracker_tgz_sha256" >&2
     exit 1
   fi
+  if ! [[ "$required" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "checksum mismatch: expected=$required actual=invalid-sha-format" >&2
+    exit 1
+  fi
 done
 
-curl -fsSL "$kernel_url" -o "$workdir/vmlinux"
-curl -fsSL "$rootfs_url" -o "$workdir/rootfs.squashfs"
-curl -fsSL "$firecracker_url" -o "$workdir/firecracker.tgz"
+mkdir -p "$source_cache_dir"
+
+fetch_pinned() {
+  local url="$1"
+  local expected_sha="$2"
+  local dest="$3"
+  local cache_path="$source_cache_dir/$expected_sha"
+  if [[ -f "$cache_path" ]]; then
+    cp "$cache_path" "$dest"
+    return 0
+  fi
+  local tmp="$dest.part"
+  curl --fail --silent --show-error --location \
+    --retry 5 --retry-delay 2 --retry-connrefused \
+    --connect-timeout 20 --max-time "$fetch_timeout_sec" \
+    "$url" -o "$tmp"
+  local actual_sha
+  actual_sha="$(sha256sum "$tmp" | awk '{print $1}')"
+  if [[ "$actual_sha" != "$expected_sha" ]]; then
+    echo "download checksum mismatch: url=$url expected=$expected_sha actual=$actual_sha" >&2
+    rm -f "$tmp"
+    exit 1
+  fi
+  mv "$tmp" "$dest"
+  cp "$dest" "$cache_path"
+}
+
+fetch_pinned "$kernel_url" "$kernel_expected_sha" "$workdir/vmlinux"
+fetch_pinned "$rootfs_url" "$rootfs_expected_sha" "$workdir/rootfs.squashfs"
+fetch_pinned "$firecracker_url" "$firecracker_expected_sha" "$workdir/firecracker.tgz"
 
 kernel_actual_sha="$(sha256sum "$workdir/vmlinux" | awk '{print $1}')"
 rootfs_actual_sha="$(sha256sum "$workdir/rootfs.squashfs" | awk '{print $1}')"

@@ -203,3 +203,32 @@ func TestExportRunBundleMarksPartialMeta(t *testing.T) {
 		t.Fatalf("expected raw meta partial=true, got %#v", rawMeta["partial"])
 	}
 }
+
+func TestValidateSymlinkTargetRejectsEscape(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	linkPath := filepath.Join(root, "runs", "rid", "trace.jsonl")
+	if _, err := validateSymlinkTarget(root, linkPath, "/etc/passwd"); err == nil {
+		t.Fatalf("expected absolute symlink target rejection")
+	}
+	if _, err := validateSymlinkTarget(root, linkPath, "../../../../../etc/passwd"); err == nil {
+		t.Fatalf("expected parent escape rejection")
+	}
+}
+
+func TestValidateSymlinkTargetAllowsInTreeRelative(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	linkPath := filepath.Join(root, "runs", "rid", "trace.jsonl")
+	got, err := validateSymlinkTarget(root, linkPath, "../rid/trace.ndjson")
+	if err != nil {
+		t.Fatalf("expected in-tree symlink target allowed, got %v", err)
+	}
+	if got != filepath.Clean("../rid/trace.ndjson") {
+		t.Fatalf("cleaned symlink target mismatch: %q", got)
+	}
+	_, err = validateSymlinkTarget(root, linkPath, ".")
+	if err == nil {
+		t.Fatalf("expected '.' symlink target rejection")
+	}
+}

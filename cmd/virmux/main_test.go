@@ -15,6 +15,7 @@ import (
 	"github.com/haris/virmux/internal/agent"
 	"github.com/haris/virmux/internal/store"
 	"github.com/haris/virmux/internal/trace"
+	trpc "github.com/haris/virmux/internal/transport/rpc"
 	"github.com/haris/virmux/internal/vm"
 )
 
@@ -404,5 +405,78 @@ func TestMaybeAutoExportFailureEmitsPartialEventAndArtifact(t *testing.T) {
 	}
 	if sha == "" || bytes == 0 {
 		t.Fatalf("expected recorded bundle artifact, got sha=%q bytes=%d", sha, bytes)
+	}
+}
+
+func TestParseReadyBanner(t *testing.T) {
+	t.Parallel()
+	caps, err := parseReadyBanner("READY v0 tools=shell.exec,fs.read\n")
+	if err != nil {
+		t.Fatalf("parse ready banner: %v", err)
+	}
+	if len(caps) != 2 || caps[0] != "shell.exec" || caps[1] != "fs.read" {
+		t.Fatalf("unexpected caps: %#v", caps)
+	}
+	if _, err := parseReadyBanner("HELLO v0 tools=shell.exec\n"); err == nil {
+		t.Fatalf("expected malformed READY banner rejection")
+	}
+}
+
+func TestCleanupRunTransientPathsRemovesSocket(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	sockPath := filepath.Join(tmp, "vsock.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen socket: %v", err)
+	}
+	defer ln.Close()
+	if err := cleanupRunTransientPaths([]string{sockPath}); err != nil {
+		t.Fatalf("cleanup transient paths: %v", err)
+	}
+	if _, err := os.Lstat(sockPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected socket removed, got err=%v", err)
+	}
+}
+
+func TestIsBridgeCommandExitError(t *testing.T) {
+	t.Parallel()
+	if !isBridgeCommandExitError(errors.New("vm command exit rc=1; wait err=signal: terminated")) {
+		t.Fatalf("expected bridge command exit classification")
+	}
+	if isBridgeCommandExitError(errors.New("vm command exit rc=2")) {
+		t.Fatalf("unexpected bridge command exit classification for rc=2")
+	}
+}
+
+func TestMaterializeToolRefsWritesArtifacts(t *testing.T) {
+	t.Parallel()
+	runDir := t.TempDir()
+	res := trpc.Response{
+		StdoutRef: "artifacts/1.out",
+		StderrRef: "artifacts/1.err",
+		Data:      map[string]any{"stdout": "hi\n", "stderr": ""},
+	}
+	if err := materializeToolRefs(runDir, &res); err != nil {
+		t.Fatalf("materialize tool refs: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(runDir, "artifacts", "1.out"))
+	if err != nil {
+		t.Fatalf("read stdout artifact: %v", err)
+	}
+	if string(b) != "hi\n" {
+		t.Fatalf("stdout artifact mismatch: %q", string(b))
+	}
+}
+
+func TestMaterializeToolRefsRejectsEscape(t *testing.T) {
+	t.Parallel()
+	runDir := t.TempDir()
+	res := trpc.Response{
+		StdoutRef: "../escape.out",
+		Data:      map[string]any{"stdout": "x"},
+	}
+	if err := materializeToolRefs(runDir, &res); err == nil {
+		t.Fatalf("expected escape ref rejection")
 	}
 }

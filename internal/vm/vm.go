@@ -576,9 +576,18 @@ func startSession(ctx context.Context, art Artifacts, runDir string, memMiB int6
 	})
 }
 
-func waitMachine(ctx context.Context, s *session, timeout time.Duration) error {
-	return waitMachineWithWatchdog(ctx, s, timeout, nil)
-}
+var (
+	startSessionFn = startSession
+	stopVMMFn      = func(s *session) error {
+		if s == nil || s.machine == nil {
+			return nil
+		}
+		return s.machine.StopVMM()
+	}
+	waitMachineWithWatchdogFn = waitMachineWithWatchdog
+	sleepFn                   = time.Sleep
+	processAliveFn            = processAlive
+)
 
 type watchdogMachine interface {
 	Wait(context.Context) error
@@ -671,6 +680,34 @@ func waitMachineWithWatchdogDeps(ctx context.Context, m watchdogMachine, socketP
 			})
 		}
 	}
+}
+
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, syscall.Signal(0))
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+func normalizeResumeWaitErr(waitErr error, pidLookup func() (int, error)) error {
+	if waitErr == nil {
+		return nil
+	}
+	if !errors.Is(waitErr, context.DeadlineExceeded) {
+		return waitErr
+	}
+	if pidLookup == nil {
+		return waitErr
+	}
+	pid, err := pidLookup()
+	if err != nil || pid <= 0 {
+		return waitErr
+	}
+	if !processAliveFn(pid) {
+		return nil
+	}
+	return waitErr
 }
 
 func serialScript(command string) string {
@@ -805,8 +842,8 @@ func runWithRuntime(ctx context.Context, art Artifacts, runDir string, cfg RunCo
 			"injected": false,
 			"error":    readyErr.Error(),
 		})
-		_ = s.machine.StopVMM()
-		waitErr := waitMachineWithWatchdog(ctx, s, cfg.Timeout, cfg.EventHook)
+		_ = stopVMMFn(s)
+		waitErr := waitMachineWithWatchdogFn(ctx, s, cfg.Timeout, cfg.EventHook)
 		exitPayload := map[string]any{}
 		if waitErr != nil {
 			exitPayload["wait_error"] = waitErr.Error()
@@ -835,8 +872,8 @@ func runWithRuntime(ctx context.Context, art Artifacts, runDir string, cfg RunCo
 	})
 	if cfg.AfterInject != nil {
 		if err := cfg.AfterInject(ctx); err != nil {
-			_ = s.machine.StopVMM()
-			_ = waitMachineWithWatchdog(ctx, s, cfg.Timeout, cfg.EventHook)
+			_ = stopVMMFn(s)
+			_ = waitMachineWithWatchdogFn(ctx, s, cfg.Timeout, cfg.EventHook)
 			emitEvent(cfg.EventHook, "vm.exit.observed", map[string]any{"wait_error": err.Error()})
 			serial := s.serialBuf.String()
 			emitSerialChunks(cfg.EventHook, serial, cfg.ChunkEventLimit, cfg.ChunkBytes)
@@ -847,8 +884,8 @@ func runWithRuntime(ctx context.Context, art Artifacts, runDir string, cfg RunCo
 	_ = s.stdin.Close()
 
 	commandWaitErr := waitForExecCompletionLine(ctx, s.serialBuf, cfg.Timeout)
-	_ = s.machine.StopVMM()
-	waitErr := waitMachineWithWatchdog(ctx, s, cfg.Timeout, cfg.EventHook)
+	_ = stopVMMFn(s)
+	waitErr := waitMachineWithWatchdogFn(ctx, s, cfg.Timeout, cfg.EventHook)
 	exitPayload := map[string]any{}
 	if waitErr != nil {
 		exitPayload["wait_error"] = waitErr.Error()
@@ -1056,7 +1093,7 @@ func Zygote(ctx context.Context, art Artifacts, runDir, snapshotDir string, memM
 }
 
 func ZygoteWithHook(ctx context.Context, art Artifacts, runDir, snapshotDir string, memMiB int64, timeout time.Duration, dataVolumePath string, hook EventHook) (Outcome, string, string, error) {
-	s, bootMS, err := startSession(ctx, art, runDir, memMiB, dataVolumePath, nil, nil, hook)
+	s, bootMS, err := startSessionFn(ctx, art, runDir, memMiB, dataVolumePath, nil, nil, hook)
 	if err != nil {
 		return Outcome{}, "", "", err
 	}
@@ -1068,15 +1105,15 @@ func ZygoteWithHook(ctx context.Context, art Artifacts, runDir, snapshotDir stri
 	memPath := filepath.Join(snapshotDir, "vm.mem")
 	statePath := filepath.Join(snapshotDir, "vm.state")
 
-	time.Sleep(4 * time.Second)
+	sleepFn(4 * time.Second)
 	if err := s.machine.PauseVM(ctx); err != nil {
 		return Outcome{}, "", "", fmt.Errorf("pause vm: %w", err)
 	}
 	if err := s.machine.CreateSnapshot(ctx, memPath, statePath); err != nil {
 		return Outcome{}, "", "", fmt.Errorf("create snapshot: %w", err)
 	}
-	_ = s.machine.StopVMM()
-	waitErr := waitMachineWithWatchdog(ctx, s, timeout, hook)
+	_ = stopVMMFn(s)
+	waitErr := waitMachineWithWatchdogFn(ctx, s, timeout, hook)
 	exitPayload := map[string]any{}
 	if waitErr != nil {
 		exitPayload["wait_error"] = waitErr.Error()
@@ -1102,28 +1139,42 @@ func ResumeWithHook(ctx context.Context, art Artifacts, runDir, memPath, statePa
 		SnapshotPath: statePath,
 		ResumeVM:     true,
 	}
-	s, resumeMS, err := startSession(ctx, art, runDir, memMiB, dataVolumePath, snap, nil, hook)
+	s, resumeMS, err := startSessionFn(ctx, art, runDir, memMiB, dataVolumePath, snap, nil, hook)
 	if err != nil {
 		return Outcome{}, err
 	}
 	defer s.close()
 
-	time.Sleep(1200 * time.Millisecond)
+	sleepFn(1200 * time.Millisecond)
 	emitEvent(hook, "vm.exec.injected", map[string]any{
 		"command": "resume_noop_stop",
 	})
-	_ = s.machine.StopVMM()
-	waitErr := waitMachineWithWatchdog(ctx, s, 2*time.Second, hook)
+	waitTimeout := timeout
+	if waitTimeout <= 0 {
+		waitTimeout = 2 * time.Second
+	}
+	_ = stopVMMFn(s)
+	waitErr := waitMachineWithWatchdogFn(ctx, s, waitTimeout, hook)
+	waitErr = normalizeResumeWaitErr(waitErr, func() (int, error) {
+		if s.machine == nil {
+			return 0, errors.New("nil machine")
+		}
+		return s.machine.PID()
+	})
 	exitPayload := map[string]any{}
 	if waitErr != nil {
 		exitPayload["wait_error"] = waitErr.Error()
 	}
 	emitEvent(hook, "vm.exit.observed", exitPayload)
 	summary := s.pipes.summary()
-	return Outcome{
+	outcome := Outcome{
 		ResumeMS:    resumeMS,
 		LostLogs:    summary.LostLogs,
 		LostMetrics: summary.LostMetrics,
 		Serial:      s.serialBuf.String(),
-	}, nil
+	}
+	if waitErr != nil {
+		return outcome, fmt.Errorf("wait vm exit after resume stop: %w", waitErr)
+	}
+	return outcome, nil
 }

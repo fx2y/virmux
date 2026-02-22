@@ -4,7 +4,6 @@ source "$(dirname "$0")/common.sh"
 root="$(repo_root)"
 agent="c3fs"
 "$root/scripts/doctor.sh"
-mise run image:stamp >/dev/null
 go run ./cmd/virmux vm-run --agent "$agent" --images-lock "$root/vm/images.lock" --runs-dir "$root/runs" --db "$root/runs/virmux.sqlite" --vsock-cid 3 --tool fs.write --tool-args-json '{"path":"/data/c3.txt","bytes":"hello"}' --timeout-sec 20 >/dev/null
 out="$(go run ./cmd/virmux vm-run --agent "$agent" --images-lock "$root/vm/images.lock" --runs-dir "$root/runs" --db "$root/runs/virmux.sqlite" --vsock-cid 3 --tool fs.read --tool-args-json '{"path":"/data/c3.txt"}' --timeout-sec 20)"
 run_id="$(printf '%s' "$out" | jq -r '.run_id')"
