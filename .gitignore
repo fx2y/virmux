@@ -6,6 +6,7 @@ vm/snapshots/
 *.log
 
 .tmp
+AGENTS.local.md
 
 # Spec filtering (intentional project structure)
 spec-*/

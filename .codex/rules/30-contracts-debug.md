@@ -1,0 +1,30 @@
+---
+paths:
+  - "scripts/doctor.sh"
+  - "scripts/vm_*.sh"
+  - "scripts/bench_snapshot.sh"
+  - "scripts/trace_validate.sh"
+  - "scripts/db_check.sh"
+  - "scripts/slack_*.sh"
+  - "scripts/pw_*.sh"
+  - "internal/vm/*.go"
+  - "internal/store/*.go"
+  - "internal/trace/*.go"
+  - "internal/slack/*.go"
+  - "internal/vm/**/*.go"
+  - "internal/store/**/*.go"
+  - "internal/trace/**/*.go"
+  - "internal/slack/**/*.go"
+---
+# Failure -> Fix Playbook
+- `doctor: FAIL: CPU virtualization flags missing` -> wrong host/VM nesting; use Ubuntu 24.04 bare-metal with vmx/svm.
+- `doctor: FAIL: kvm module is not loaded` -> load kvm module or ensure built-in visibility via `/sys/module/kvm`.
+- `doctor: FAIL: /dev/kvm is not readable+writable` -> fix ACL/group (`kvm`) for current user.
+- `doctor: FAIL: firecracker binary not found` -> run `mise run image:stamp` or install host firecracker; verify PATH/lock.
+- `vm smoke output missing markers` -> inspect `runs/<id>/serial.log` + `firecracker.stderr.log`; keep marker contract + host stop.
+- Snapshot resume API/path failures are expected on some combos; keep fallback green but always persist error telemetry.
+- `trace:validate` failures mean schema regression; restore required fields/types before merging.
+- `db:check` WAL/FK/index failures mean store contract drift; fix DSN/schema/migrations, do not bypass checks.
+- `pw:install` rootless failures are acceptable only via documented fallback path; keep cache stamp semantics intact.
+- `slack:recv` challenge mismatch -> fixture drift or handler regression; ensure url_verification echoes challenge verbatim.
+- Unexpected `mise` skip usually means unchanged `sources+outputs`; touch intended inputs or clean targeted outputs.
