@@ -8,12 +8,15 @@ paths:
   - "**/*.css"
 ---
 # UI + State Rules (future-facing)
-- UI is an operator console, not marketing: terse copy, explicit status, no decorative ambiguity.
-- Canonical data model is run/event/trace semantics from backend contracts; never invent alternate truth in UI.
-- State split:
-- Server state (fetched/persisted) is immutable snapshots keyed by IDs.
-- UI state (filters/panels/sort) is ephemeral and local.
-- Derived data must be pure selectors; no duplicated denormalized blobs.
-- Time/render contract: show UTC timestamps; preserve raw IDs + statuses; avoid lossy formatting in primary views.
-- Error UX: surface exact failing invariant + next command (`doctor`, `trace:validate`, `db:check`, etc.).
-- New UI flows require deterministic replay fixture(s) and at least one headless smoke assertion.
+- UI is an operator console, not marketing: terse copy, explicit statuses, zero decorative ambiguity.
+- Backend contracts are source-of-truth (`runs`,`events`,`artifacts`,`trace`); UI must not invent alternate truth models.
+- State split is strict:
+- server state = immutable snapshots keyed by IDs
+- UI state = ephemeral view controls (filters/sort/panels)
+- derived state = pure selectors only; no duplicated denormalized caches
+- Render contract:
+- primary timestamps shown in UTC
+- raw IDs, modes, and status enums remain visible (not prettified away)
+- resume telemetry keys (`resume_mode`,`resume_source`,`resume_error`) remain first-class in views
+- Error UX shows failing invariant and immediate repair command (`doctor`,`trace:validate`,`db:check`,`vm:cleanup:audit`, etc.).
+- New UI features require deterministic replay fixtures plus >=1 headless smoke assertion tied to contract data.

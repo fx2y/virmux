@@ -4,12 +4,27 @@ paths:
   - "internal/**/*.go"
 ---
 # Go Runtime Rules
-- CLI stays thin: parse flags + wire deps; business logic belongs in `internal/*`.
-- Public behavior changes require tests in same package (`*_test.go`) covering success + failure path.
-- Errors wrap operation context (`op: %w`); never drop root cause.
-- `context.Context` is mandatory for I/O or long-running paths; no background goroutine leaks.
-- Keep VM automation host-driven and deterministic; never rely on guest self-shutdown as sole completion signal.
-- Preserve smoke markers (`Linux`,`ok`) and resume marker (`resumed_ok`) unless contract/test updates are included.
-- `vm.Resume` must preserve snapshot-first semantics + cold-boot fallback telemetry (`resume_mode`,`resume_error`).
-- Store invariants are non-negotiable: WAL, FK, required indexes; schema changes require `db:check` updates.
-- Trace invariants are non-negotiable: each line has `ts,run_id,task,event,payload(object)`.
+- CLI stays thin: flags+DI only; business logic stays in `internal/*`.
+- Public behavior changes require package-local tests (`*_test.go`) for success + failure paths.
+- Errors wrap op context (`op: %w`) and preserve root cause.
+- `context.Context` is required for I/O/long paths; no goroutine leaks.
+- VM execution is host-driven and deterministic; never depend on guest self-poweroff as sole completion.
+- Command wrapper protocol must preserve `__cmd_start__`/`__cmd_end__` and smoke markers `Linux`,`ok`.
+- Boundary event contract is hard: emit `vm.boot.started`,`vm.exec.injected`,`vm.exit.observed` on VM lanes.
+- Resume contract:
+- Resolve precedence is `explicit mem/state > agent.last_snapshot_id > latest.json`.
+- Attempt snapshot once; on any resolve/load/wait fault fallback cold boot is mandatory.
+- Snapshot failure path must `StopVMM+Wait` before fallback launch.
+- Every `vm:resume` terminal payload includes non-null `resume_mode`,`resume_source`,`resume_error`.
+- Snapshot restore must use SDK snapshot handler path (`WithSnapshot(...)`); config-only snapshot fields are insufficient.
+- Agent/state contract:
+- Source of truth is `agents/<id>.json` via `internal/agent`.
+- Persistent RW disk is `volumes/<agent>.ext4`; rootfs remains RO (`rootflags=noload`).
+- Data/store contract:
+- `runs` persists runtime identity (`agent_id`,`kernel_sha`,`rootfs_sha`,`snapshot_id`,`cost_est`) additively.
+- `artifacts` table is mandatory inventory for run outputs (serial/stderr/trace/resume/vsock evidence).
+- Artifact hashing policy: hash regular files only; non-regular inode types are metadata-only rows (`meta:*`).
+- SQLite invariants are hard: WAL+FK+required indexes; schema updates must keep `db:check` green.
+- Trace contract:
+- JSONL is append-only (`O_APPEND|O_CREATE|O_WRONLY`), never truncating reopen.
+- Per-event write ordering is `trace emit -> sqlite insert`; do not reorder without contract rewrite.

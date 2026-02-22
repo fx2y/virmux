@@ -17,14 +17,27 @@ paths:
   - "internal/slack/**/*.go"
 ---
 # Failure -> Fix Playbook
-- `doctor: FAIL: CPU virtualization flags missing` -> wrong host/VM nesting; use Ubuntu 24.04 bare-metal with vmx/svm.
-- `doctor: FAIL: kvm module is not loaded` -> load kvm module or ensure built-in visibility via `/sys/module/kvm`.
-- `doctor: FAIL: /dev/kvm is not readable+writable` -> fix ACL/group (`kvm`) for current user.
-- `doctor: FAIL: firecracker binary not found` -> run `mise run image:stamp` or install host firecracker; verify PATH/lock.
-- `vm smoke output missing markers` -> inspect `runs/<id>/serial.log` + `firecracker.stderr.log`; keep marker contract + host stop.
-- Snapshot resume API/path failures are expected on some combos; keep fallback green but always persist error telemetry.
-- `trace:validate` failures mean schema regression; restore required fields/types before merging.
-- `db:check` WAL/FK/index failures mean store contract drift; fix DSN/schema/migrations, do not bypass checks.
-- `pw:install` rootless failures are acceptable only via documented fallback path; keep cache stamp semantics intact.
-- `slack:recv` challenge mismatch -> fixture drift or handler regression; ensure url_verification echoes challenge verbatim.
-- Unexpected `mise` skip usually means unchanged `sources+outputs`; touch intended inputs or clean targeted outputs.
+- Stop-ship invariants:
+- doctor hard-fails on missing host/KVM/artifact/socket prerequisites
+- smoke serial includes `Linux` and `ok`
+- resume lane cannot be fallback-only on healthy zygote path
+- every `vm:resume` terminal event has non-null `resume_mode`,`resume_source`,`resume_error`
+- event boundaries include `vm.boot.started`,`vm.exec.injected`,`vm.exit.observed`
+- `trace:validate`, `db:check`, cohort-scoped SQL cert, and cleanup audit all pass
+
+- High-signal symptom map:
+- `doctor: CPU virtualization flags missing` -> wrong host/nesting; require Ubuntu 24.04 bare-metal vmx/svm.
+- `doctor: kvm module is not loaded` -> load module or verify built-in visibility at `/sys/module/kvm`.
+- `doctor: /dev/kvm is not readable+writable` -> fix ACL/group membership (`kvm`) for current user.
+- `doctor: firecracker binary/artifact invalid` -> refresh image lock/artifacts; require executable lock-selected binary.
+- smoke markers missing -> inspect `runs/<id>/serial.log` and `runs/<id>/firecracker.stderr.log`; preserve wrapper markers and host stop path.
+- `resume_mode` always fallback -> snapshot restore path regressed (usually wrong SDK handler); verify real snapshot load path and zygote lineage.
+- vm resume early hard-fail on missing snapshot metadata -> fallback policy regressed; restore mandatory cold-boot fallback.
+- run stuck `status=running` after errors -> finalization atomicity broken; ensure terminal run status is persisted even on event mirror failures.
+- `trace:validate` red -> trace schema/order regression; restore required fields/types and append semantics.
+- `db:check` red -> WAL/FK/index drift; repair schema/migration/DSN, never bypass.
+- bench false-green -> sample scope drift; enforce cohort-only stats + snapshot count guard.
+- cleanup audit false-green -> missing probe deps or swallowed errors; use deterministic POSIX probes and hard-fail on tool absence.
+- cert SQL false-red on legacy rows -> scope to cert cohort (or backfill legacy rows before global checks).
+- `slack:recv` challenge mismatch -> fixture drift or handler regression; echo challenge verbatim.
+- `pw:install` rootless failures are valid only through documented fallback sequence.

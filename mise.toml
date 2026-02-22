@@ -142,7 +142,14 @@ outputs = ["tmp/qa-sql-contract.ok"]
 description = "Install node deps and Playwright browsers with cache"
 run = "./scripts/pw_install.sh"
 sources = ["package.json", "package-lock.json", "scripts/pw_install.sh"]
-outputs = [".cache/ms-playwright/.install-stamp", "node_modules/.package-lock.json"]
+outputs = [".cache/ms-playwright/.install-stamp", "node_modules/.package-lock.json", "tmp/pw-install-status.json"]
+
+[tasks."pw:install:status"]
+description = "Guard: pw:install writes structured install/audit status"
+depends = ["pw:install"]
+run = "./scripts/test_pw_install_status.sh"
+sources = ["scripts/test_pw_install_status.sh", "tmp/pw-install-status.json"]
+outputs = ["tmp/pw-install-status.ok"]
 
 [tasks."pw:smoke"]
 description = "Host-side Playwright chromium smoke"
@@ -163,6 +170,12 @@ depends = ["slack:fixture"]
 run = "./scripts/slack_recv.sh"
 sources = ["scripts/slack_recv.sh", "fixtures/slack/*.json", "cmd/**/*.go", "internal/**/*.go"]
 outputs = ["tmp/slack-server.log", "runs/virmux.sqlite"]
+
+[tasks."ship:core"]
+description = "Uncached core certification lane (runtime execution + fresh-run assertion)"
+run = "./scripts/ship_core.sh"
+sources = ["scripts/ship_core.sh", "scripts/common.sh", "scripts/doctor.sh", "scripts/test_doctor_missing_artifact.sh", "scripts/test_doctor_socket_probe.sh", "scripts/test_image_checksum_mismatch.sh", "scripts/vm_smoke.sh", "scripts/vm_zygote.sh", "scripts/vm_resume.sh", "scripts/test_vm_agent_persistence.sh", "scripts/test_vm_resume_fallback_no_snapshot.sh", "scripts/test_vm_resume_snapshot_success.sh", "scripts/bench_snapshot.sh", "scripts/trace_validate.sh", "scripts/db_check.sh", "scripts/sql_cert_contract.sh", "scripts/cleanup_audit.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock"]
+outputs = ["tmp/ship-core-summary.json", "tmp/cleanup-audit.ok", "runs/bench-snapshot-summary.json", "runs/virmux.sqlite"]
 
 [tasks.fmt]
 description = "Format Go and JS"

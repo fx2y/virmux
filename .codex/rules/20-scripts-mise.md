@@ -6,14 +6,27 @@ paths:
   - "vm/images.lock"
 ---
 # Script + DAG Rules
-- Bash scripts start with `#!/usr/bin/env bash` + `set -euo pipefail`.
-- Reuse `scripts/common.sh` helpers (`repo_root`, hash/lock helpers); no duplicated repo-root logic.
-- `doctor` remains bootstrap-safe: never require `vm/images.lock` in its source set.
-- `doctor` failures must be hard, explicit, and actionable; no soft warnings for required prerequisites.
-- Expensive tasks must declare precise `sources` + `outputs`; skip-on-unchanged is required, not optional.
-- Image pipeline is content-addressed only: hash(manifest + build scripts) -> immutable cache dir -> `vm/images.lock`.
-- Never edit cached artifacts in place; write new sha dir and repoint lock.
-- Approved fallbacks only:
-- `pw:install`: `--with-deps` then browser-only retry.
-- `vm:resume`: snapshot-first then fallback cold boot with telemetry.
-- Task names are API surface; renames require updating docs/scripts/callers in same diff.
+- Bash scripts require `#!/usr/bin/env bash` and `set -euo pipefail`.
+- Reuse `scripts/common.sh`; do not duplicate repo-root/hash/lock helpers.
+- `doctor` is a hard preflight gate:
+- bootstrap-safe task graph (must run on cold clone)
+- explicit FAIL lines with direct remediation
+- must tolerate built-in KVM via `/sys/module/kvm`
+- must validate lock-selected artifact triplet + executable firecracker + AF_UNIX bind/unlink viability
+- Runtime-critical wrappers (`vm_smoke.sh`,`vm_resume.sh`,`vm_zygote.sh`,`vm_smoke_parallel.sh`) must invoke `./scripts/doctor.sh` before VM launch, regardless of `mise` skip state.
+- Expensive tasks must define precise `sources` + `outputs`; incremental skip correctness is a contract.
+- Image pipeline is content-addressed + byte-pinned:
+- manifest pins remote source checksums (`kernel`,`rootfs_squashfs`,`firecracker_tgz`)
+- build verifies downloaded bytes before use
+- cache key must mix manifest + source pins + build logic
+- cache dirs are immutable; never modify `.cache/ghostfleet/images/<sha>/` in place
+- approved fallback matrix is explicit and narrow:
+- `vm:resume`: snapshot attempt then cold-boot fallback with canonical telemetry
+- `pw:install`: `--with-deps` then browser-only retry
+- `bench:snapshot` is a hard perf gate, not trend logging:
+- scope samples to bench cohort
+- enforce `total_samples==iterations`
+- enforce `snapshot_resume_count>=1`
+- enforce p50/p95 budgets from task config
+- Certification SQL helpers on append-only DBs must use explicit cohort scoping.
+- Task names are public API; renames require same-diff updates to callers/docs/tests.
