@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
@@ -223,5 +224,72 @@ func TestPersistRunArtifactsStoresSocketMetadata(t *testing.T) {
 	}
 	if size != 0 {
 		t.Fatalf("expected size 0, got %d", size)
+	}
+}
+
+func TestCollectArtifactRecordSymlinkMetadataOnly(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	target := filepath.Join(tmp, "target.txt")
+	if err := os.WriteFile(target, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	link := filepath.Join(tmp, "link.txt")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+	sha, size, include, err := collectArtifactRecord(link)
+	if err != nil {
+		t.Fatalf("collect symlink record: %v", err)
+	}
+	if !include {
+		t.Fatalf("expected symlink artifact included")
+	}
+	if sha != "meta:symlink" {
+		t.Fatalf("expected meta:symlink, got %q", sha)
+	}
+	if size != 0 {
+		t.Fatalf("expected symlink size=0, got %d", size)
+	}
+}
+
+func Test_runWithStorePrepareRunFilesCreatesAliasAndMeta(t *testing.T) {
+	t.Parallel()
+	runDir := t.TempDir()
+	started := time.Date(2026, 2, 22, 18, 0, 0, 0, time.UTC)
+	tracePath, compatPath, metaPath, err := prepareRunFiles(runDir, "rid-1", "vm:smoke", started)
+	if err != nil {
+		t.Fatalf("prepare run files: %v", err)
+	}
+	if filepath.Base(tracePath) != tracePrimaryName {
+		t.Fatalf("expected primary trace filename %q, got %q", tracePrimaryName, tracePath)
+	}
+	info, err := os.Lstat(compatPath)
+	if err != nil {
+		t.Fatalf("lstat compat path: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("expected %s to be symlink", compatPath)
+	}
+	target, err := os.Readlink(compatPath)
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+	if target != tracePrimaryName {
+		t.Fatalf("expected symlink target %q, got %q", tracePrimaryName, target)
+	}
+	metaRaw, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("read meta skeleton: %v", err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(metaRaw, &meta); err != nil {
+		t.Fatalf("unmarshal meta skeleton: %v", err)
+	}
+	if got := meta["trace_path"]; got != tracePrimaryName {
+		t.Fatalf("expected trace_path=%q, got %#v", tracePrimaryName, got)
+	}
+	if got := meta["trace_compat_path"]; got != traceCompatName {
+		t.Fatalf("expected trace_compat_path=%q, got %#v", traceCompatName, got)
 	}
 }

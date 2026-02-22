@@ -40,6 +40,12 @@ type runRuntime struct {
 	runID func(task string, started time.Time) string
 }
 
+const (
+	tracePrimaryName = "trace.ndjson"
+	traceCompatName  = "trace.jsonl"
+	runMetaName      = "meta.json"
+)
+
 var defaultRunRuntime = runRuntime{
 	now: func() time.Time { return time.Now().UTC() },
 	runID: func(task string, started time.Time) string {
@@ -129,7 +135,14 @@ func newVMRunRunner(cfg *runCommon, command string, requiredMarkers []string) vm
 		if emitErr != nil {
 			return vm.Outcome{}, nil, emitErr
 		}
-		details := map[string]any{"serial_log": filepath.Join(runDir, "serial.log")}
+		details := map[string]any{
+			"serial_log":     filepath.Join(runDir, "serial.log"),
+			"fc_log":         filepath.Join(runDir, "fc.log"),
+			"fc_metrics_log": filepath.Join(runDir, "fc.metrics.log"),
+			"lost_logs":      outcome.LostLogs,
+			"lost_metrics":   outcome.LostMetrics,
+			"guest_ready_ms": outcome.GuestReadyMS,
+		}
 		if vsockPath != "" {
 			details["vsock_uds_path"] = vsockPath
 		}
@@ -333,6 +346,37 @@ func cmdVMResume(args []string) error {
 type vmEventEmitter func(event string, payload map[string]any) error
 type vmRunner func(ctx context.Context, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error)
 
+func prepareRunFiles(runDir, runID, task string, started time.Time) (string, string, string, error) {
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		return "", "", "", err
+	}
+	tracePath := filepath.Join(runDir, tracePrimaryName)
+	traceCompatPath := filepath.Join(runDir, traceCompatName)
+	if err := os.Remove(traceCompatPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", "", "", fmt.Errorf("remove stale trace alias: %w", err)
+	}
+	if err := os.Symlink(tracePrimaryName, traceCompatPath); err != nil {
+		return "", "", "", fmt.Errorf("create trace alias %s -> %s: %w", traceCompatPath, tracePrimaryName, err)
+	}
+	metaPath := filepath.Join(runDir, runMetaName)
+	metaSkeleton := map[string]any{
+		"run_id":            runID,
+		"task":              task,
+		"status":            "running",
+		"started_at":        started.Format(time.RFC3339Nano),
+		"trace_path":        tracePrimaryName,
+		"trace_compat_path": traceCompatName,
+	}
+	metaBytes, err := json.MarshalIndent(metaSkeleton, "", "  ")
+	if err != nil {
+		return "", "", "", fmt.Errorf("marshal meta skeleton: %w", err)
+	}
+	if err := os.WriteFile(metaPath, append(metaBytes, '\n'), 0o644); err != nil {
+		return "", "", "", fmt.Errorf("write meta skeleton: %w", err)
+	}
+	return tracePath, traceCompatPath, metaPath, nil
+}
+
 func runWithStore(cfg *runCommon, task string, startedPayload map[string]any, runner vmRunner, runtime runRuntime) error {
 	if runtime.now == nil {
 		runtime.now = func() time.Time { return time.Now().UTC() }
@@ -365,8 +409,8 @@ func runWithStore(cfg *runCommon, task string, startedPayload map[string]any, ru
 	started := runtime.now().UTC()
 	runID := runtime.runID(task, started)
 	runDir := filepath.Join(cfg.runsDir, runID)
-	tracePath := filepath.Join(runDir, "trace.jsonl")
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
+	tracePath, traceCompatPath, metaPath, err := prepareRunFiles(runDir, runID, task, started)
+	if err != nil {
 		return err
 	}
 
@@ -429,7 +473,11 @@ func runWithStore(cfg *runCommon, task string, startedPayload map[string]any, ru
 	artifactErr := persistRunArtifacts(ctx, st, runID, []string{
 		filepath.Join(runDir, "serial.log"),
 		filepath.Join(runDir, "firecracker.stderr.log"),
+		filepath.Join(runDir, "fc.log"),
+		filepath.Join(runDir, "fc.metrics.log"),
 		tracePath,
+		traceCompatPath,
+		metaPath,
 		stringDetail(payload, "mem_path"),
 		stringDetail(payload, "state_path"),
 		stringDetail(payload, "fallback_trace"),
@@ -509,7 +557,7 @@ func persistRunArtifacts(ctx context.Context, st *store.Store, runID string, pat
 }
 
 func collectArtifactRecord(path string) (sha string, size int64, include bool, err error) {
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return "", 0, false, nil
@@ -517,6 +565,9 @@ func collectArtifactRecord(path string) (sha string, size int64, include bool, e
 		return "", 0, false, fmt.Errorf("stat artifact %s: %w", path, err)
 	}
 	mode := info.Mode()
+	if mode&os.ModeSymlink != 0 {
+		return "meta:symlink", 0, true, nil
+	}
 	if mode.IsRegular() {
 		sum, hashErr := fileSHA256(path)
 		if hashErr != nil {
@@ -529,8 +580,6 @@ func collectArtifactRecord(path string) (sha string, size int64, include bool, e
 		return "meta:socket", 0, true, nil
 	case mode&os.ModeNamedPipe != 0:
 		return "meta:fifo", 0, true, nil
-	case mode&os.ModeSymlink != 0:
-		return "meta:symlink", 0, true, nil
 	case mode.IsDir():
 		return "meta:dir", 0, true, nil
 	default:

@@ -65,6 +65,13 @@ run = "MISE_JOBS=${MISE_JOBS:-$(nproc)} ./scripts/vm_smoke_parallel.sh"
 sources = ["scripts/vm_smoke_parallel.sh", "scripts/vm_smoke.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock"]
 outputs = ["runs/.last-smoke-parallel", "runs/virmux.sqlite"]
 
+[tasks."vm:boot:contract"]
+description = "Uncached boot telemetry gate: fifo drains + guest-ready boundary + lost counters"
+depends = ["doctor", "image:stamp"]
+run = "./scripts/vm_boot_contract.sh"
+sources = ["scripts/vm_boot_contract.sh", "scripts/vm_smoke.sh", "scripts/common.sh", "scripts/doctor.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock"]
+outputs = ["tmp/vm-boot-contract.ok", "tmp/vm-boot-contract.json", "runs/virmux.sqlite"]
+
 [tasks."vm:zygote"]
 description = "Create pause snapshot for zygote-style resumes"
 depends = ["doctor", "image:stamp"]
@@ -123,7 +130,7 @@ outputs = ["tmp/cleanup-audit.ok", "tmp/cleanup-audit.log"]
 [tasks."trace:validate"]
 description = "Validate trace JSONL schema contract"
 run = "./scripts/trace_validate.sh"
-sources = ["scripts/trace_validate.sh", "runs/*/trace.jsonl"]
+sources = ["scripts/trace_validate.sh", "runs/*/trace.ndjson", "runs/*/trace.jsonl"]
 outputs = ["runs/.trace-validate.ok"]
 
 [tasks."db:check"]
@@ -174,7 +181,7 @@ outputs = ["tmp/slack-server.log", "runs/virmux.sqlite"]
 [tasks."ship:core"]
 description = "Uncached core certification lane (runtime execution + fresh-run assertion)"
 run = "./scripts/ship_core.sh"
-sources = ["scripts/ship_core.sh", "scripts/common.sh", "scripts/doctor.sh", "scripts/test_doctor_missing_artifact.sh", "scripts/test_doctor_socket_probe.sh", "scripts/test_image_checksum_mismatch.sh", "scripts/vm_smoke.sh", "scripts/vm_zygote.sh", "scripts/vm_resume.sh", "scripts/test_vm_agent_persistence.sh", "scripts/test_vm_resume_fallback_no_snapshot.sh", "scripts/test_vm_resume_snapshot_success.sh", "scripts/bench_snapshot.sh", "scripts/trace_validate.sh", "scripts/db_check.sh", "scripts/sql_cert_contract.sh", "scripts/cleanup_audit.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock"]
+sources = ["scripts/ship_core.sh", "scripts/common.sh", "scripts/doctor.sh", "scripts/test_doctor_missing_artifact.sh", "scripts/test_doctor_socket_probe.sh", "scripts/test_image_checksum_mismatch.sh", "scripts/vm_boot_contract.sh", "scripts/vm_smoke.sh", "scripts/vm_zygote.sh", "scripts/vm_resume.sh", "scripts/test_vm_agent_persistence.sh", "scripts/test_vm_resume_fallback_no_snapshot.sh", "scripts/test_vm_resume_snapshot_success.sh", "scripts/bench_snapshot.sh", "scripts/trace_validate.sh", "scripts/db_check.sh", "scripts/sql_cert_contract.sh", "scripts/cleanup_audit.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock"]
 outputs = ["tmp/ship-core-summary.json", "tmp/cleanup-audit.ok", "runs/bench-snapshot-summary.json", "runs/virmux.sqlite"]
 
 [tasks.fmt]

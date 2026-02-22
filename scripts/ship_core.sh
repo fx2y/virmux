@@ -14,6 +14,7 @@ mise run ci:fast
 ./scripts/test_doctor_missing_artifact.sh
 ./scripts/test_doctor_socket_probe.sh
 ./scripts/test_image_checksum_mismatch.sh
+./scripts/vm_boot_contract.sh
 ./scripts/vm_smoke.sh --label "$cert_tag-smoke"
 ./scripts/test_vm_agent_persistence.sh
 ./scripts/test_vm_resume_fallback_no_snapshot.sh

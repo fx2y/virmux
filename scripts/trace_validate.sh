@@ -4,9 +4,9 @@ set -euo pipefail
 root="$(git rev-parse --show-toplevel)"
 
 shopt -s nullglob
-files=("$root"/runs/*/trace.jsonl)
+files=("$root"/runs/*/trace.ndjson "$root"/runs/*/trace.jsonl)
 if [[ ${#files[@]} -eq 0 ]]; then
-  echo "trace:validate: no trace files in runs/*/trace.jsonl" >&2
+  echo "trace:validate: no trace files in runs/*/{trace.ndjson,trace.jsonl}" >&2
   exit 1
 fi
 

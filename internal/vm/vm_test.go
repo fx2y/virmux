@@ -133,3 +133,67 @@ func TestResolveVsockDeviceValidation(t *testing.T) {
 		t.Fatalf("expected uds path /tmp/v.sock, got %q", got.Path)
 	}
 }
+
+func TestRuntimeUsesInjectedBooter(t *testing.T) {
+	t.Parallel()
+	errSentinel := errors.New("boom")
+	fake := &fakeBooter{err: errSentinel}
+	_, err := runWithRuntime(context.Background(), Artifacts{}, t.TempDir(), RunConfig{
+		MemMiB:    128,
+		Timeout:   time.Second,
+		Command:   "echo ok",
+		VsockCID:  3,
+		VsockPath: "/tmp/vsock.sock",
+	}, vmRuntime{booter: fake})
+	if !errors.Is(err, errSentinel) {
+		t.Fatalf("expected sentinel error, got %v", err)
+	}
+	if !fake.called {
+		t.Fatalf("expected injected booter to be called")
+	}
+	if fake.req.Vsock == nil || fake.req.Vsock.CID != 3 {
+		t.Fatalf("expected vsock request propagated, got %+v", fake.req.Vsock)
+	}
+}
+
+func TestDefaultKernelArgsIncludeSerialHardening(t *testing.T) {
+	t.Parallel()
+	args := defaultKernelArgs()
+	for _, want := range []string{"quiet", "loglevel=1", "8250.nr_uarts=1", "rootflags=noload"} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("kernel args missing %q: %q", want, args)
+		}
+	}
+}
+
+func TestLoggerSingleShotRejectsSecondClaim(t *testing.T) {
+	t.Parallel()
+	guard := &loggerSingleShot{}
+	if err := guard.claim(); err != nil {
+		t.Fatalf("first claim should succeed: %v", err)
+	}
+	if err := guard.claim(); err == nil {
+		t.Fatalf("second claim should fail")
+	}
+}
+
+func TestExtractLostCounters(t *testing.T) {
+	t.Parallel()
+	line := `{"utc_timestamp_ms":1,"signals":{"lost_logs":2,"lost_metrics":3}}`
+	lostLogs, lostMetrics := extractLostCounters(line)
+	if lostLogs != 2 || lostMetrics != 3 {
+		t.Fatalf("unexpected lost counters logs=%d metrics=%d", lostLogs, lostMetrics)
+	}
+}
+
+type fakeBooter struct {
+	called bool
+	err    error
+	req    sessionBootRequest
+}
+
+func (f *fakeBooter) Start(_ context.Context, req sessionBootRequest) (*session, int64, error) {
+	f.called = true
+	f.req = req
+	return nil, 0, f.err
+}
