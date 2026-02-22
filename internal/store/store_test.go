@@ -22,6 +22,7 @@ func TestStoreSchemaAndFK(t *testing.T) {
 		ID:        "run-1",
 		Task:      "vm:smoke",
 		Label:     "test",
+		AgentID:   "A",
 		ImageSHA:  "abc",
 		StartedAt: time.Now(),
 	}
@@ -36,5 +37,12 @@ func TestStoreSchemaAndFK(t *testing.T) {
 	}
 	if err := s.FinishRun(ctx, run.ID, "ok", 10, 0, "runs/run-1/trace.jsonl", time.Now()); err != nil {
 		t.Fatalf("finish run: %v", err)
+	}
+	var got string
+	if err := s.db.QueryRow(`SELECT agent_id FROM runs WHERE id=?`, run.ID).Scan(&got); err != nil {
+		t.Fatalf("query agent_id: %v", err)
+	}
+	if got != "A" {
+		t.Fatalf("expected agent_id A, got %q", got)
 	}
 }

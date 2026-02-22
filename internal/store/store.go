@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -15,6 +16,7 @@ type Run struct {
 	ID        string
 	Task      string
 	Label     string
+	AgentID   string
 	ImageSHA  string
 	StartedAt time.Time
 }
@@ -56,6 +58,7 @@ CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
   task TEXT NOT NULL,
   label TEXT NOT NULL DEFAULT '',
+  agent_id TEXT NOT NULL DEFAULT 'default',
   image_sha TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'running',
   started_at TEXT NOT NULL,
@@ -84,16 +87,20 @@ CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at);
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("ensure schema: %w", err)
 	}
+	if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'default'`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("ensure runs.agent_id: %w", err)
+	}
 	return nil
 }
 
 func (s *Store) StartRun(ctx context.Context, run Run) error {
 	_, err := s.db.ExecContext(
 		ctx,
-		`INSERT INTO runs(id,task,label,image_sha,status,started_at) VALUES(?,?,?,?,?,?)`,
+		`INSERT INTO runs(id,task,label,agent_id,image_sha,status,started_at) VALUES(?,?,?,?,?,?,?)`,
 		run.ID,
 		run.Task,
 		run.Label,
+		run.AgentID,
 		run.ImageSHA,
 		"running",
 		run.StartedAt.UTC().Format(time.RFC3339Nano),

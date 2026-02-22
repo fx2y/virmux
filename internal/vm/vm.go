@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -41,6 +42,7 @@ type RunConfig struct {
 	Timeout         time.Duration
 	Command         string
 	RequiredMarkers []string
+	DataVolumePath  string
 	EventHook       EventHook
 }
 
@@ -106,7 +108,56 @@ func emitEvent(hook EventHook, kind string, payload map[string]any) {
 	hook(Event{Kind: kind, Payload: payload})
 }
 
-func startSession(ctx context.Context, art Artifacts, runDir string, memMiB int64, snapshot *firecracker.SnapshotConfig, eventHook EventHook) (*session, int64, error) {
+func EnsureExt4Volume(path string, sizeMiB int64) error {
+	if sizeMiB <= 0 {
+		sizeMiB = 128
+	}
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create volumes dir: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o644)
+	if err != nil {
+		return fmt.Errorf("create volume: %w", err)
+	}
+	if err := f.Truncate(sizeMiB * 1024 * 1024); err != nil {
+		f.Close()
+		return fmt.Errorf("size volume: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close volume: %w", err)
+	}
+	cmd := exec.Command("mkfs.ext4", "-F", path)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("mkfs.ext4 volume: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func buildDrives(art Artifacts, dataVolumePath string) []models.Drive {
+	drives := []models.Drive{
+		{
+			DriveID:      firecracker.String("rootfs"),
+			PathOnHost:   firecracker.String(art.Rootfs),
+			IsRootDevice: firecracker.Bool(true),
+			IsReadOnly:   firecracker.Bool(true),
+		},
+	}
+	if strings.TrimSpace(dataVolumePath) != "" {
+		drives = append(drives, models.Drive{
+			DriveID:      firecracker.String("data"),
+			PathOnHost:   firecracker.String(dataVolumePath),
+			IsRootDevice: firecracker.Bool(false),
+			IsReadOnly:   firecracker.Bool(false),
+		})
+	}
+	return drives
+}
+
+func startSession(ctx context.Context, art Artifacts, runDir string, memMiB int64, dataVolumePath string, snapshot *firecracker.SnapshotConfig, eventHook EventHook) (*session, int64, error) {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		return nil, 0, fmt.Errorf("create run dir: %w", err)
 	}
@@ -130,8 +181,8 @@ func startSession(ctx context.Context, art Artifacts, runDir string, memMiB int6
 	cfg := firecracker.Config{
 		SocketPath:      socketPath,
 		KernelImagePath: art.Kernel,
-		KernelArgs:      "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/bin/sh",
-		Drives:          firecracker.NewDrivesBuilder(art.Rootfs).Build(),
+		KernelArgs:      "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro rootflags=noload init=/bin/sh",
+		Drives:          buildDrives(art, dataVolumePath),
 		MachineCfg: models.MachineConfiguration{
 			VcpuCount:  firecracker.Int64(1),
 			MemSizeMib: firecracker.Int64(memMiB),
@@ -182,7 +233,15 @@ func waitMachine(ctx context.Context, s *session, timeout time.Duration) error {
 }
 
 func serialScript(command string) string {
-	return "echo __cmd_start__\n" + command + "\necho __cmd_end__\npoweroff -f\n"
+	return strings.Join([]string{
+		"mkdir -p /mnt/data",
+		"mount -t ext4 /dev/vdb /mnt/data || mount /dev/vdb /mnt/data || true",
+		"echo __cmd_start__",
+		command,
+		"echo __cmd_end__",
+		"poweroff -f",
+		"",
+	}, "\n")
 }
 
 func Run(ctx context.Context, art Artifacts, runDir string, cfg RunConfig) (Outcome, error) {
@@ -194,7 +253,7 @@ func Run(ctx context.Context, art Artifacts, runDir string, cfg RunConfig) (Outc
 		return Outcome{}, errors.New("vm timeout must be > 0")
 	}
 
-	s, bootMS, err := startSession(ctx, art, runDir, cfg.MemMiB, nil, cfg.EventHook)
+	s, bootMS, err := startSession(ctx, art, runDir, cfg.MemMiB, cfg.DataVolumePath, nil, cfg.EventHook)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -207,7 +266,7 @@ func Run(ctx context.Context, art Artifacts, runDir string, cfg RunConfig) (Outc
 	})
 	_ = s.stdin.Close()
 
-	time.Sleep(2 * time.Second)
+	time.Sleep(4 * time.Second)
 	_ = s.machine.StopVMM()
 	waitErr := waitMachine(ctx, s, cfg.Timeout)
 	exitPayload := map[string]any{}
@@ -235,17 +294,18 @@ func Run(ctx context.Context, art Artifacts, runDir string, cfg RunConfig) (Outc
 	return Outcome{BootMS: bootMS, Serial: serial}, nil
 }
 
-func Smoke(ctx context.Context, art Artifacts, runDir string, memMiB int64, timeout time.Duration) (Outcome, error) {
+func Smoke(ctx context.Context, art Artifacts, runDir string, memMiB int64, timeout time.Duration, dataVolumePath string) (Outcome, error) {
 	return Run(ctx, art, runDir, RunConfig{
 		MemMiB:          memMiB,
 		Timeout:         timeout,
 		Command:         defaultSmokeCommand,
 		RequiredMarkers: []string{"Linux", "ok"},
+		DataVolumePath:  dataVolumePath,
 	})
 }
 
-func Zygote(ctx context.Context, art Artifacts, runDir, snapshotDir string, memMiB int64, timeout time.Duration) (Outcome, string, string, error) {
-	s, bootMS, err := startSession(ctx, art, runDir, memMiB, nil, nil)
+func Zygote(ctx context.Context, art Artifacts, runDir, snapshotDir string, memMiB int64, timeout time.Duration, dataVolumePath string) (Outcome, string, string, error) {
+	s, bootMS, err := startSession(ctx, art, runDir, memMiB, dataVolumePath, nil, nil)
 	if err != nil {
 		return Outcome{}, "", "", err
 	}
@@ -270,13 +330,13 @@ func Zygote(ctx context.Context, art Artifacts, runDir, snapshotDir string, memM
 	return Outcome{BootMS: bootMS, Serial: s.serialBuf.String()}, memPath, statePath, nil
 }
 
-func Resume(ctx context.Context, art Artifacts, runDir, memPath, statePath string, memMiB int64, timeout time.Duration) (Outcome, error) {
+func Resume(ctx context.Context, art Artifacts, runDir, memPath, statePath string, memMiB int64, timeout time.Duration, dataVolumePath string) (Outcome, error) {
 	snap := &firecracker.SnapshotConfig{
 		MemFilePath:  memPath,
 		SnapshotPath: statePath,
 		ResumeVM:     false,
 	}
-	s, resumeMS, err := startSession(ctx, art, runDir, memMiB, snap, nil)
+	s, resumeMS, err := startSession(ctx, art, runDir, memMiB, dataVolumePath, snap, nil)
 	if err != nil {
 		return Outcome{}, err
 	}

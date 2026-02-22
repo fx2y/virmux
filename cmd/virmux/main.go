@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/haris/virmux/internal/agent"
 	"github.com/haris/virmux/internal/slack"
 	"github.com/haris/virmux/internal/store"
 	"github.com/haris/virmux/internal/trace"
@@ -25,6 +26,7 @@ type runCommon struct {
 	runsDir    string
 	dbPath     string
 	label      string
+	agentID    string
 	memMiB     int64
 	timeout    time.Duration
 }
@@ -75,6 +77,7 @@ func commonFlags(name string) (*flag.FlagSet, *runCommon, *int) {
 	fs.StringVar(&cfg.runsDir, "runs-dir", "runs", "run output directory")
 	fs.StringVar(&cfg.dbPath, "db", "runs/virmux.sqlite", "sqlite db path")
 	fs.StringVar(&cfg.label, "label", "", "run label")
+	fs.StringVar(&cfg.agentID, "agent", "default", "agent id")
 	timeoutSec := fs.Int("timeout-sec", 30, "vm timeout in seconds")
 	fs.Int64Var(&cfg.memMiB, "mem-mib", 512, "microVM memory MiB")
 	return fs, cfg, timeoutSec
@@ -95,13 +98,14 @@ func parseVMRunArgs(name string, args []string, defaultCmd string) (*runCommon, 
 }
 
 func newVMRunRunner(cfg *runCommon, command string, requiredMarkers []string) vmRunner {
-	return func(ctx context.Context, art vm.Artifacts, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
+	return func(ctx context.Context, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
 		var emitErr error
 		outcome, err := vm.Run(ctx, art, runDir, vm.RunConfig{
 			MemMiB:          cfg.memMiB,
 			Timeout:         cfg.timeout,
 			Command:         command,
 			RequiredMarkers: requiredMarkers,
+			DataVolumePath:  meta.VolumePath,
 			EventHook: func(evt vm.Event) {
 				if emitErr != nil {
 					return
@@ -152,21 +156,25 @@ func cmdVMZygote(args []string) error {
 	}
 	cfg.timeout = time.Duration(*timeoutSec) * time.Second
 
-	return runWithStore(cfg, "vm:zygote", map[string]any{"label": cfg.label}, func(ctx context.Context, art vm.Artifacts, runDir string, _ vmEventEmitter) (vm.Outcome, map[string]any, error) {
+	return runWithStore(cfg, "vm:zygote", map[string]any{"label": cfg.label}, func(ctx context.Context, art vm.Artifacts, meta agent.Meta, runDir string, _ vmEventEmitter) (vm.Outcome, map[string]any, error) {
 		base := *snapshotDir
 		if base == "" {
 			repoRoot := filepath.Dir(filepath.Dir(cfg.imagesLock))
-			base = filepath.Join(repoRoot, "vm", "snapshots", art.ImageSHA)
+			base = filepath.Join(repoRoot, "vm", "snapshots", art.ImageSHA, cfg.agentID)
 		}
-		outcome, memPath, statePath, err := vm.Zygote(ctx, art, runDir, base, cfg.memMiB, cfg.timeout)
+		snapshotID := fmt.Sprintf("%d", time.Now().UTC().UnixNano())
+		snapshotPath := filepath.Join(base, snapshotID)
+		outcome, memPath, statePath, err := vm.Zygote(ctx, art, runDir, snapshotPath, cfg.memMiB, cfg.timeout, meta.VolumePath)
 		if err != nil {
 			return outcome, nil, err
 		}
 		latest := map[string]any{
-			"mem_path":   memPath,
-			"state_path": statePath,
-			"image_sha":  art.ImageSHA,
-			"updated_at": time.Now().UTC().Format(time.RFC3339Nano),
+			"snapshot_id": snapshotID,
+			"mem_path":    memPath,
+			"state_path":  statePath,
+			"image_sha":   art.ImageSHA,
+			"agent_id":    cfg.agentID,
+			"updated_at":  time.Now().UTC().Format(time.RFC3339Nano),
 		}
 		if err := os.MkdirAll(base, 0o755); err != nil {
 			return outcome, nil, err
@@ -175,7 +183,13 @@ func cmdVMZygote(args []string) error {
 		if err := os.WriteFile(filepath.Join(base, "latest.json"), data, 0o644); err != nil {
 			return outcome, nil, err
 		}
-		return outcome, map[string]any{"snapshot_dir": base, "mem_path": memPath, "state_path": statePath}, nil
+		meta.LastSnapshotID = snapshotID
+		repoRoot := filepath.Dir(filepath.Dir(cfg.imagesLock))
+		agentStore := agent.NewStore(filepath.Join(repoRoot, "agents"), filepath.Join(repoRoot, "volumes"))
+		if err := agentStore.Save(meta); err != nil {
+			return outcome, nil, err
+		}
+		return outcome, map[string]any{"snapshot_dir": base, "snapshot_id": snapshotID, "mem_path": memPath, "state_path": statePath}, nil
 	}, defaultRunRuntime)
 }
 
@@ -189,40 +203,50 @@ func cmdVMResume(args []string) error {
 	}
 	cfg.timeout = time.Duration(*timeoutSec) * time.Second
 
-	return runWithStore(cfg, "vm:resume", map[string]any{"label": cfg.label}, func(ctx context.Context, art vm.Artifacts, runDir string, _ vmEventEmitter) (vm.Outcome, map[string]any, error) {
+	return runWithStore(cfg, "vm:resume", map[string]any{"label": cfg.label}, func(ctx context.Context, art vm.Artifacts, meta agent.Meta, runDir string, _ vmEventEmitter) (vm.Outcome, map[string]any, error) {
 		mPath := *memPath
 		sPath := *statePath
 		base := *snapshotDir
 		if base == "" {
 			repoRoot := filepath.Dir(filepath.Dir(cfg.imagesLock))
-			base = filepath.Join(repoRoot, "vm", "snapshots", art.ImageSHA)
+			base = filepath.Join(repoRoot, "vm", "snapshots", art.ImageSHA, cfg.agentID)
 		}
 		if mPath == "" || sPath == "" {
-			data, err := os.ReadFile(filepath.Join(base, "latest.json"))
-			if err != nil {
-				return vm.Outcome{}, nil, fmt.Errorf("read latest snapshot metadata: %w", err)
+			if meta.LastSnapshotID != "" {
+				if mPath == "" {
+					mPath = filepath.Join(base, meta.LastSnapshotID, "vm.mem")
+				}
+				if sPath == "" {
+					sPath = filepath.Join(base, meta.LastSnapshotID, "vm.state")
+				}
 			}
-			var latest struct {
-				MemPath   string `json:"mem_path"`
-				StatePath string `json:"state_path"`
-			}
-			if err := json.Unmarshal(data, &latest); err != nil {
-				return vm.Outcome{}, nil, fmt.Errorf("parse latest snapshot metadata: %w", err)
-			}
-			if mPath == "" {
-				mPath = latest.MemPath
-			}
-			if sPath == "" {
-				sPath = latest.StatePath
+			if mPath == "" || sPath == "" {
+				data, err := os.ReadFile(filepath.Join(base, "latest.json"))
+				if err != nil {
+					return vm.Outcome{}, nil, fmt.Errorf("read latest snapshot metadata: %w", err)
+				}
+				var latest struct {
+					MemPath   string `json:"mem_path"`
+					StatePath string `json:"state_path"`
+				}
+				if err := json.Unmarshal(data, &latest); err != nil {
+					return vm.Outcome{}, nil, fmt.Errorf("parse latest snapshot metadata: %w", err)
+				}
+				if mPath == "" {
+					mPath = latest.MemPath
+				}
+				if sPath == "" {
+					sPath = latest.StatePath
+				}
 			}
 		}
 
-		outcome, err := vm.Resume(ctx, art, runDir, mPath, sPath, cfg.memMiB, cfg.timeout)
+		outcome, err := vm.Resume(ctx, art, runDir, mPath, sPath, cfg.memMiB, cfg.timeout, meta.VolumePath)
 		if err == nil {
-			return outcome, map[string]any{"mem_path": mPath, "state_path": sPath, "resume_mode": "snapshot"}, nil
+			return outcome, map[string]any{"mem_path": mPath, "state_path": sPath, "resume_mode": "snapshot_resume"}, nil
 		}
 		fallbackDir := filepath.Join(runDir, "fallback-coldboot")
-		fallback, fbErr := vm.Smoke(ctx, art, fallbackDir, cfg.memMiB, cfg.timeout)
+		fallback, fbErr := vm.Smoke(ctx, art, fallbackDir, cfg.memMiB, cfg.timeout, meta.VolumePath)
 		if fbErr != nil {
 			return vm.Outcome{}, nil, fmt.Errorf("snapshot resume failed (%v); fallback smoke failed (%v)", err, fbErr)
 		}
@@ -239,7 +263,7 @@ func cmdVMResume(args []string) error {
 }
 
 type vmEventEmitter func(event string, payload map[string]any) error
-type vmRunner func(ctx context.Context, art vm.Artifacts, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error)
+type vmRunner func(ctx context.Context, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error)
 
 func runWithStore(cfg *runCommon, task string, startedPayload map[string]any, runner vmRunner, runtime runRuntime) error {
 	if runtime.now == nil {
@@ -253,6 +277,15 @@ func runWithStore(cfg *runCommon, task string, startedPayload map[string]any, ru
 	ctx := context.Background()
 	art, err := vm.LoadArtifacts(cfg.imagesLock)
 	if err != nil {
+		return err
+	}
+	repoRoot := filepath.Dir(filepath.Dir(cfg.imagesLock))
+	agentStore := agent.NewStore(filepath.Join(repoRoot, "agents"), filepath.Join(repoRoot, "volumes"))
+	meta, err := agentStore.Ensure(cfg.agentID)
+	if err != nil {
+		return err
+	}
+	if err := vm.EnsureExt4Volume(meta.VolumePath, 128); err != nil {
 		return err
 	}
 	st, err := store.Open(cfg.dbPath)
@@ -275,7 +308,7 @@ func runWithStore(cfg *runCommon, task string, startedPayload map[string]any, ru
 	}
 	defer tw.Close()
 
-	if err := st.StartRun(ctx, store.Run{ID: runID, Task: task, Label: cfg.label, ImageSHA: art.ImageSHA, StartedAt: started}); err != nil {
+	if err := st.StartRun(ctx, store.Run{ID: runID, Task: task, Label: cfg.label, AgentID: cfg.agentID, ImageSHA: art.ImageSHA, StartedAt: started}); err != nil {
 		return err
 	}
 	if startedPayload == nil {
@@ -284,11 +317,12 @@ func runWithStore(cfg *runCommon, task string, startedPayload map[string]any, ru
 	if _, ok := startedPayload["label"]; !ok {
 		startedPayload["label"] = cfg.label
 	}
+	startedPayload["agent_id"] = cfg.agentID
 	if err := emit(ctx, st, tw, runID, task, "run.started", startedPayload, runtime.now); err != nil {
 		return err
 	}
 
-	outcome, details, runErr := runner(ctx, art, runDir, func(event string, payload map[string]any) error {
+	outcome, details, runErr := runner(ctx, art, meta, runDir, func(event string, payload map[string]any) error {
 		return emit(ctx, st, tw, runID, task, event, payload, runtime.now)
 	})
 	status := "ok"

@@ -10,7 +10,7 @@ import (
 
 func TestParseVMRunArgsOverridesCommand(t *testing.T) {
 	t.Parallel()
-	cfg, command, err := parseVMRunArgs("vm-run", []string{"--cmd", "echo hello", "--label", "demo", "--timeout-sec", "9", "--mem-mib", "1024"}, "uname -a")
+	cfg, command, err := parseVMRunArgs("vm-run", []string{"--cmd", "echo hello", "--label", "demo", "--agent", "A", "--timeout-sec", "9", "--mem-mib", "1024"}, "uname -a")
 	if err != nil {
 		t.Fatalf("parse vm-run args: %v", err)
 	}
@@ -22,6 +22,9 @@ func TestParseVMRunArgsOverridesCommand(t *testing.T) {
 	}
 	if cfg.timeout != 9*time.Second {
 		t.Fatalf("expected timeout 9s, got %s", cfg.timeout)
+	}
+	if cfg.agentID != "A" {
+		t.Fatalf("expected agent A, got %q", cfg.agentID)
 	}
 	if cfg.memMiB != 1024 {
 		t.Fatalf("expected mem_mib 1024, got %d", cfg.memMiB)

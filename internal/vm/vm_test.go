@@ -61,9 +61,27 @@ func TestRunRejectsNonPositiveTimeout(t *testing.T) {
 func TestSerialScriptWrapsMarkers(t *testing.T) {
 	t.Parallel()
 	got := serialScript("uname -a")
-	for _, want := range []string{"__cmd_start__", "uname -a", "__cmd_end__", "poweroff -f"} {
+	for _, want := range []string{"mount -t ext4 /dev/vdb /mnt/data", "__cmd_start__", "uname -a", "__cmd_end__", "poweroff -f"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("script missing marker %q: %q", want, got)
 		}
+	}
+}
+
+func TestBuildDrivesRootfsReadonlyAndDataWritable(t *testing.T) {
+	t.Parallel()
+	art := Artifacts{Rootfs: "/tmp/rootfs.ext4"}
+	drives := buildDrives(art, "/tmp/A.ext4")
+	if len(drives) != 2 {
+		t.Fatalf("expected 2 drives, got %d", len(drives))
+	}
+	if drives[0].IsRootDevice == nil || !*drives[0].IsRootDevice {
+		t.Fatalf("expected rootfs root-device")
+	}
+	if drives[0].IsReadOnly == nil || !*drives[0].IsReadOnly {
+		t.Fatalf("expected rootfs readonly")
+	}
+	if drives[1].IsReadOnly == nil || *drives[1].IsReadOnly {
+		t.Fatalf("expected data drive writable")
 	}
 }

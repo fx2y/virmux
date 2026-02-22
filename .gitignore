@@ -3,6 +3,8 @@ node_modules/
 runs/
 tmp/
 vm/snapshots/
+agents/
+volumes/
 *.log
 
 .tmp

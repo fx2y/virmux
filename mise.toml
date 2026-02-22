@@ -73,6 +73,13 @@ run = "./scripts/vm_resume.sh"
 sources = ["scripts/vm_resume.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock"]
 outputs = ["runs/.last-resume", "runs/virmux.sqlite"]
 
+[tasks."vm:test:agent-persistence"]
+description = "Guard: per-agent data volume persists and isolates across runs"
+depends = ["doctor", "image:stamp"]
+run = "./scripts/test_vm_agent_persistence.sh"
+sources = ["scripts/test_vm_agent_persistence.sh", "scripts/common.sh", "scripts/doctor.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock"]
+outputs = ["tmp/vm-agent-persistence.ok", "runs/virmux.sqlite", "agents/A.json", "volumes/A.ext4"]
+
 [tasks."bench:snapshot"]
 description = "Measure snapshot resume latency repeatedly"
 depends = ["vm:zygote"]
