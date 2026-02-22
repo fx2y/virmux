@@ -260,6 +260,18 @@ run = "./scripts/ship_core.sh"
 sources = ["scripts/ship_core.sh", "scripts/common.sh", "scripts/doctor.sh", "scripts/test_doctor_missing_artifact.sh", "scripts/test_doctor_socket_probe.sh", "scripts/test_image_checksum_mismatch.sh", "scripts/vm_boot_contract.sh", "scripts/vm_vsock_chaos.sh", "scripts/vm_smoke.sh", "scripts/vm_zygote.sh", "scripts/vm_resume.sh", "scripts/test_vm_agent_persistence.sh", "scripts/test_vm_resume_fallback_no_snapshot.sh", "scripts/test_vm_resume_snapshot_success.sh", "scripts/bench_snapshot.sh", "scripts/trace_validate.sh", "scripts/db_check.sh", "scripts/sql_cert_contract.sh", "scripts/cleanup_audit.sh", "scripts/vm_test_export_roundtrip.sh", "scripts/vm_test_watchdog.sh", "scripts/vm_test_crash_partial_export.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock", "docs/**/*.md"]
 outputs = ["tmp/ship-core-summary.json", "tmp/cleanup-audit.ok", "tmp/vm-test-watchdog.ok", "tmp/vm-test-crash-partial-export.ok", "runs/bench-snapshot-summary.json", "runs/virmux.sqlite"]
 
+[tasks."skill:lint"]
+description = "Lint canonical skill artifacts (C1)"
+run = ["go run ./cmd/virmux skill lint skills/dd >/dev/null", "mkdir -p tmp && date -u +%FT%TZ > tmp/skill-lint.ok"]
+sources = ["cmd/**/*.go", "internal/skill/**/*.go", "skills/**/*.md", "skills/**/*.yaml", "skills/**/*.json"]
+outputs = ["tmp/skill-lint.ok"]
+
+[tasks."skill:test:core"]
+description = "Focused C1 skill-core guards"
+run = "./scripts/skill_test_core.sh"
+sources = ["scripts/skill_test_core.sh", "cmd/**/*.go", "internal/**/*.go", "skills/**/*.md", "skills/**/*.yaml", "skills/**/*.json"]
+outputs = ["tmp/skill-test-core.ok"]
+
 [tasks.fmt]
 description = "Format Go and JS"
 run = ["gofmt -w $(find cmd internal -name '*.go')", "npx prettier --write scripts/pw_smoke.mjs", "mkdir -p tmp && date -u +%Y-%m-%dT%H:%M:%SZ > tmp/fmt.ok"]

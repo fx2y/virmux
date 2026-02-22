@@ -1,0 +1,10 @@
+{
+  "id": "case01",
+  "tool": "shell.exec",
+  "cmd": "printf 'ok\\n' > /dev/virmux-data/dd.out && echo ok",
+  "deterministic": true,
+  "expect": {
+    "files": ["dd.out"],
+    "schema": "dd-c1"
+  }
+}

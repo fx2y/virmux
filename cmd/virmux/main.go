@@ -76,7 +76,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: virmux <vm-run|vm-smoke|vm-zygote|vm-resume|export|import|slack-server>")
+		return errors.New("usage: virmux <vm-run|vm-smoke|vm-zygote|vm-resume|skill|export|import|slack-server>")
 	}
 	switch args[0] {
 	case "vm-run":
@@ -87,6 +87,8 @@ func run(args []string) error {
 		return cmdVMZygote(args[1:])
 	case "vm-resume":
 		return cmdVMResume(args[1:])
+	case "skill":
+		return cmdSkill(args[1:])
 	case "export":
 		return cmdExport(args[1:])
 	case "import":
@@ -772,6 +774,8 @@ func runWithStore(cfg *runCommon, task string, startedPayload map[string]any, ru
 		stringDetail(payload, "state_path"),
 		stringDetail(payload, "fallback_trace"),
 		stringDetail(payload, "vsock_uds_path"),
+		stringDetail(payload, "score_path"),
+		stringDetail(payload, "skill_meta_path"),
 	})
 	cleanupErr := cleanupRunTransientPaths([]string{stringDetail(payload, "vsock_uds_path")})
 
