@@ -28,7 +28,11 @@ calc_image_sha() {
     jq -r '[.kernel_sha256,.rootfs_squashfs_sha256,.firecracker_tgz_sha256] | @tsv' "$manifest"
   )"
   local hasher_input
-  hasher_input="$(sha256sum "$manifest" "$script" "$inner" | awk '{print $1}' | tr '\n' ' ') $source_pins"
+  local agentd_hashes=""
+  if [[ -d "$root/cmd/virmux-agentd" || -d "$root/internal/agentd" ]]; then
+    agentd_hashes="$(find "$root/cmd/virmux-agentd" "$root/internal/agentd" "$root/internal/transport" -type f -name '*.go' 2>/dev/null | sort | xargs -r sha256sum | awk '{print $1}' | tr '\n' ' ')"
+  fi
+  hasher_input="$(sha256sum "$manifest" "$script" "$inner" "$root/go.mod" "$root/go.sum" | awk '{print $1}' | tr '\n' ' ') $source_pins $agentd_hashes"
   printf '%s' "$hasher_input" | sha256sum | awk '{print $1}'
 }
 

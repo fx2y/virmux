@@ -79,6 +79,33 @@ run = "./scripts/vm_vsock_chaos.sh"
 sources = ["scripts/vm_vsock_chaos.sh", "scripts/common.sh", "scripts/doctor.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock"]
 outputs = ["tmp/vm-vsock-chaos.ok", "tmp/vsock-chaos-report.json", "runs/virmux.sqlite"]
 
+[tasks."vm:test:tool-shell"]
+description = "C3 gate: vm agentd shell.exec over vsock returns deterministic result"
+depends = ["doctor", "image:stamp"]
+run = "./scripts/vm_test_tool_shell.sh"
+sources = ["scripts/vm_test_tool_shell.sh", "scripts/common.sh", "scripts/doctor.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock"]
+outputs = ["tmp/vm-test-tool-shell.ok", "runs/virmux.sqlite"]
+
+[tasks."vm:test:tool-fs"]
+description = "C3 gate: vm agentd fs.read/fs.write roundtrip under /data"
+depends = ["doctor", "image:stamp"]
+run = "./scripts/vm_test_tool_fs.sh"
+sources = ["scripts/vm_test_tool_fs.sh", "scripts/common.sh", "scripts/doctor.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock"]
+outputs = ["tmp/vm-test-tool-fs.ok", "runs/virmux.sqlite"]
+
+[tasks."vm:test:tool-http"]
+description = "C3 gate: http tool contract + timeout typed error (tool runtime guards)"
+run = "./scripts/vm_test_tool_http.sh"
+sources = ["scripts/vm_test_tool_http.sh", "internal/agentd/**/*.go"]
+outputs = ["tmp/vm-test-tool-http.ok"]
+
+[tasks."vm:test:no-leak"]
+description = "C3 gate: deny writes outside /data"
+depends = ["doctor", "image:stamp"]
+run = "./scripts/vm_test_no_leak.sh"
+sources = ["scripts/vm_test_no_leak.sh", "scripts/common.sh", "scripts/doctor.sh", "cmd/**/*.go", "internal/**/*.go", "vm/images.lock"]
+outputs = ["tmp/vm-test-no-leak.ok", "runs/virmux.sqlite"]
+
 [tasks."vm:zygote"]
 description = "Create pause snapshot for zygote-style resumes"
 depends = ["doctor", "image:stamp"]

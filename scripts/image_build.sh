@@ -5,7 +5,10 @@ source "$(dirname "$0")/common.sh"
 
 root="$(repo_root)"
 out_dir="$(image_dir)"
+agentd_host_bin="$root/tmp/virmux-agentd-linux-amd64"
 mkdir -p "$(dirname "$out_dir")"
+mkdir -p "$root/tmp"
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$agentd_host_bin" ./cmd/virmux-agentd
 
 if [[ -f "$out_dir/.complete" ]]; then
   echo "image cache hit: $out_dir"
@@ -25,12 +28,12 @@ if command -v docker >/dev/null 2>&1; then
       export DEBIAN_FRONTEND=noninteractive
       apt-get update >/dev/null
       apt-get install -y --no-install-recommends ca-certificates curl jq squashfs-tools e2fsprogs tar coreutils >/dev/null
-      ./scripts/image_build_inner.sh
+      VIRMUX_AGENTD_HOST_BIN="'"$agentd_host_bin"'" ./scripts/image_build_inner.sh
       source ./scripts/common.sh
       chown -R "${HOST_UID}:${HOST_GID}" "$(image_dir)"
     '
 else
-  ./scripts/image_build_inner.sh
+  VIRMUX_AGENTD_HOST_BIN="$agentd_host_bin" ./scripts/image_build_inner.sh
 fi
 
 sha="$(calc_image_sha)"

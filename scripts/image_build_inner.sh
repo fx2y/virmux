@@ -62,6 +62,12 @@ if [[ "$firecracker_actual_sha" != "$firecracker_expected_sha" ]]; then
 fi
 
 unsquashfs -d "$workdir/squashfs-root" "$workdir/rootfs.squashfs" >/dev/null
+mkdir -p "$workdir/squashfs-root/usr/local/bin"
+if [[ -z "${VIRMUX_AGENTD_HOST_BIN:-}" || ! -f "${VIRMUX_AGENTD_HOST_BIN:-}" ]]; then
+  echo "VIRMUX_AGENTD_HOST_BIN missing; host wrapper must prebuild guest agentd" >&2
+  exit 1
+fi
+install -m 0755 "$VIRMUX_AGENTD_HOST_BIN" "$workdir/squashfs-root/usr/local/bin/virmux-agentd"
 truncate -s "$rootfs_size" "$workdir/rootfs.ext4"
 mkfs.ext4 -d "$workdir/squashfs-root" -F "$workdir/rootfs.ext4" >/dev/null
 

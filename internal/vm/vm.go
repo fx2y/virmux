@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -59,6 +60,7 @@ type RunConfig struct {
 	VsockCID        int64
 	VsockPath       string
 	EventHook       EventHook
+	AfterInject     func(context.Context) error
 }
 
 const defaultSmokeCommand = "echo __virmux_smoke__\nuname -a\necho ok"
@@ -581,11 +583,14 @@ func waitMachine(ctx context.Context, s *session, timeout time.Duration) error {
 
 func serialScript(command string) string {
 	return strings.Join([]string{
+		"mount -t proc proc /proc || true",
+		"mount -t sysfs sysfs /sys || true",
 		"mkdir -p /dev/virmux-data",
 		"mount -t ext4 /dev/vdb /dev/virmux-data || mount /dev/vdb /dev/virmux-data || true",
-		"echo __cmd_start__",
+		"echo __virmux_exec_start__",
 		command,
-		"echo __cmd_end__",
+		"__virmux_rc=$?",
+		"printf '__virmux_exec_rc__=%s\\n' \"$__virmux_rc\"",
 		"poweroff -f",
 		"",
 	}, "\n")
@@ -602,7 +607,7 @@ type serialReadyWaiter struct {
 
 func defaultReadyWaiter() serialReadyWaiter {
 	return serialReadyWaiter{
-		markers:   []string{"Linux", "# ", "/ #"},
+		markers:   []string{"# ", "/ #"},
 		pollEvery: 50 * time.Millisecond,
 	}
 }
@@ -736,9 +741,20 @@ func runWithRuntime(ctx context.Context, art Artifacts, runDir string, cfg RunCo
 		"command":  command,
 		"injected": true,
 	})
+	if cfg.AfterInject != nil {
+		if err := cfg.AfterInject(ctx); err != nil {
+			_ = s.machine.StopVMM()
+			_ = waitMachine(ctx, s, cfg.Timeout)
+			emitEvent(cfg.EventHook, "vm.exit.observed", map[string]any{"wait_error": err.Error()})
+			serial := s.serialBuf.String()
+			emitSerialChunks(cfg.EventHook, serial, cfg.ChunkEventLimit, cfg.ChunkBytes)
+			summary := s.pipes.summary()
+			return Outcome{BootMS: bootMS, GuestReadyMS: readyMS, LostLogs: summary.LostLogs, LostMetrics: summary.LostMetrics, Serial: serial}, err
+		}
+	}
 	_ = s.stdin.Close()
 
-	commandWaitErr := waitForSerialMarker(ctx, s.serialBuf, "__cmd_end__", cfg.Timeout)
+	commandWaitErr := waitForExecCompletionLine(ctx, s.serialBuf, cfg.Timeout)
 	_ = s.machine.StopVMM()
 	waitErr := waitMachine(ctx, s, cfg.Timeout)
 	exitPayload := map[string]any{}
@@ -764,6 +780,31 @@ func runWithRuntime(ctx context.Context, art Artifacts, runDir string, cfg RunCo
 		return outcome, err
 	}
 	return outcome, nil
+}
+
+func waitForExecCompletionLine(ctx context.Context, serial *safeBuffer, timeout time.Duration) error {
+	if timeout <= 0 {
+		return fmt.Errorf("wait for exec completion timeout must be > 0")
+	}
+	if _, _, ok := extractCommandOutput(serial.String()); ok {
+		return nil
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for exec completion canceled: %w", ctx.Err())
+		case <-deadline.C:
+			return fmt.Errorf("wait for exec completion timeout after %s", timeout)
+		case <-ticker.C:
+			if _, _, ok := extractCommandOutput(serial.String()); ok {
+				return nil
+			}
+		}
+	}
 }
 
 func waitForSerialMarker(ctx context.Context, serial *safeBuffer, marker string, timeout time.Duration) error {
@@ -799,22 +840,69 @@ func Run(ctx context.Context, art Artifacts, runDir string, cfg RunConfig) (Outc
 }
 
 func validateSerialMarkers(serial string, required []string, waitErr error) error {
-	if !strings.Contains(serial, "__cmd_end__") {
+	output, rc, ok := extractCommandOutput(serial)
+	if !ok {
 		if waitErr != nil {
-			return fmt.Errorf("vm command markers missing; wait err=%w", waitErr)
+			return fmt.Errorf("vm command completion marker missing; wait err=%w", waitErr)
 		}
-		return errors.New("vm command markers missing (__cmd_end__)")
+		return errors.New("vm command completion marker missing")
+	}
+	if rc != 0 {
+		if waitErr != nil {
+			return fmt.Errorf("vm command exit rc=%d; wait err=%w", rc, waitErr)
+		}
+		return fmt.Errorf("vm command exit rc=%d", rc)
 	}
 	for _, marker := range required {
-		if strings.Contains(serial, marker) {
+		if strings.Contains(output, marker) {
 			continue
 		}
 		if waitErr != nil {
-			return fmt.Errorf("vm output missing marker %q; wait err=%w", marker, waitErr)
+			return fmt.Errorf("vm command output missing marker %q; wait err=%w", marker, waitErr)
 		}
-		return fmt.Errorf("vm output missing marker %q", marker)
+		return fmt.Errorf("vm command output missing marker %q", marker)
 	}
 	return nil
+}
+
+func extractCommandOutput(serial string) (string, int, bool) {
+	lines := strings.Split(strings.ReplaceAll(serial, "\r\n", "\n"), "\n")
+	const startLine = "__virmux_exec_start__"
+	const rcPrefix = "__virmux_exec_rc__="
+	start := -1
+	for i, line := range lines {
+		if trimShellPromptPrefix(line) == startLine {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return "", 0, false
+	}
+	for i := start + 1; i < len(lines); i++ {
+		line := trimShellPromptPrefix(lines[i])
+		if !strings.HasPrefix(line, rcPrefix) {
+			continue
+		}
+		rcText := strings.TrimPrefix(line, rcPrefix)
+		rc, err := strconv.Atoi(rcText)
+		if err != nil {
+			return "", 0, false
+		}
+		return strings.Join(lines[start+1:i], "\n"), rc, true
+	}
+	return "", 0, false
+}
+
+func trimShellPromptPrefix(line string) string {
+	s := strings.TrimSpace(line)
+	for strings.HasPrefix(s, "# ") {
+		s = strings.TrimSpace(strings.TrimPrefix(s, "# "))
+	}
+	if s == "#" {
+		return ""
+	}
+	return s
 }
 
 func emitSerialChunks(hook EventHook, serial string, limit, chunkBytes int) {

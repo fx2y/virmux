@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,18 +23,22 @@ import (
 	"github.com/haris/virmux/internal/slack"
 	"github.com/haris/virmux/internal/store"
 	"github.com/haris/virmux/internal/trace"
+	trpc "github.com/haris/virmux/internal/transport/rpc"
 	"github.com/haris/virmux/internal/vm"
 )
 
 type runCommon struct {
-	imagesLock string
-	runsDir    string
-	dbPath     string
-	label      string
-	agentID    string
-	memMiB     int64
-	vsockCID   int64
-	timeout    time.Duration
+	imagesLock   string
+	runsDir      string
+	dbPath       string
+	label        string
+	agentID      string
+	memMiB       int64
+	vsockCID     int64
+	timeout      time.Duration
+	tool         string
+	allowCSV     string
+	toolArgsJSON string
 }
 
 type runRuntime struct {
@@ -110,6 +116,9 @@ func commonFlags(name string) (*flag.FlagSet, *runCommon, *int) {
 func parseVMRunArgs(name string, args []string, defaultCmd string) (*runCommon, string, error) {
 	fs, cfg, timeoutSec := commonFlags(name)
 	cmd := fs.String("cmd", defaultCmd, "command(s) to run in guest over ttyS0")
+	fs.StringVar(&cfg.tool, "tool", "shell.exec", "tool to execute when vsock agentd path is enabled")
+	fs.StringVar(&cfg.allowCSV, "allow", "shell.exec,fs.read,fs.write,http.fetch", "comma-separated allowlist for agentd request")
+	fs.StringVar(&cfg.toolArgsJSON, "tool-args-json", "", "raw JSON object for agentd tool args (overrides --cmd mapping)")
 	if err := fs.Parse(args); err != nil {
 		return nil, "", err
 	}
@@ -131,10 +140,14 @@ func newVMRunRunner(cfg *runCommon, command string, requiredMarkers []string, tr
 		if cfg.vsockCID > 0 {
 			vsockPath = filepath.Join(runDir, fmt.Sprintf("vsock-%d.sock", cfg.vsockCID))
 		}
+		vmCommand := command
+		if cfg.vsockCID > 0 {
+			vmCommand = "/usr/local/bin/virmux-agentd --port 10001"
+		}
 		outcome, err := vm.Run(ctx, art, runDir, vm.RunConfig{
 			MemMiB:          cfg.memMiB,
 			Timeout:         cfg.timeout,
-			Command:         command,
+			Command:         vmCommand,
 			RequiredMarkers: requiredMarkers,
 			DataVolumePath:  meta.VolumePath,
 			ChunkEventLimit: 8,
@@ -147,6 +160,12 @@ func newVMRunRunner(cfg *runCommon, command string, requiredMarkers []string, tr
 				}
 				emitErr = emitVM(evt.Kind, evt.Payload)
 			},
+			AfterInject: func(ctx context.Context) error {
+				if cfg.vsockCID <= 0 {
+					return nil
+				}
+				return runAgentdTool(ctx, vsockPath, cfg, command, runDir, emitVM)
+			},
 		})
 		if emitErr != nil {
 			return vm.Outcome{}, nil, emitErr
@@ -157,6 +176,99 @@ func newVMRunRunner(cfg *runCommon, command string, requiredMarkers []string, tr
 		}
 		return outcome, details, err
 	}
+}
+
+func runAgentdTool(ctx context.Context, vsockPath string, cfg *runCommon, command, runDir string, emitVM vmEventEmitter) error {
+	started := time.Now()
+	dialRes, err := dialVsockBridge(ctx, vsockPath, 10001)
+	if err != nil {
+		return err
+	}
+	defer dialRes.Conn.Close()
+	reader := bufio.NewReader(dialRes.Conn)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return err
+	}
+	emitVM("vm.guest.ready", map[string]any{"latency_ms": time.Since(started).Milliseconds(), "method": "vsock_ready_banner", "caps": strings.TrimSpace(line)})
+	rw := struct {
+		io.Reader
+		io.Writer
+	}{Reader: reader, Writer: dialRes.Conn}
+	client := trpc.NewClient(rw)
+	defer client.Close()
+	allow := splitCSV(cfg.allowCSV)
+	req := trpc.Request{ReqID: 1, Tool: cfg.tool, Allow: allow}
+	if strings.TrimSpace(cfg.toolArgsJSON) != "" {
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(cfg.toolArgsJSON), &raw); err != nil {
+			return fmt.Errorf("parse --tool-args-json: %w", err)
+		}
+		req.Args = raw
+	} else {
+		switch cfg.tool {
+		case "shell.exec":
+			req.Args = map[string]any{"cmd": command, "cwd": "/dev/virmux-data", "timeout_ms": int(cfg.timeout / time.Millisecond)}
+		default:
+			return fmt.Errorf("unsupported --tool in vm-run bridge without --tool-args-json: %s", cfg.tool)
+		}
+	}
+	res, err := client.Call(ctx, req)
+	if err != nil {
+		return err
+	}
+	data, _ := json.Marshal(res)
+	return emitVM("vm.tool.result", map[string]any{"req": 1, "tool": cfg.tool, "result": string(data), "connect_attempts": dialRes.Stats.Attempts, "handshake_ms": dialRes.Stats.HandshakeMS})
+}
+
+type bridgeDialResult struct {
+	Conn  net.Conn
+	Stats transportStats
+}
+
+type bufferedConn struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func (c *bufferedConn) Read(p []byte) (int, error) { return c.r.Read(p) }
+
+func dialVsockBridge(ctx context.Context, udsPath string, port uint32) (bridgeDialResult, error) {
+	started := time.Now()
+	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", udsPath)
+	if err != nil {
+		return bridgeDialResult{}, err
+	}
+	br := bufio.NewReader(conn)
+	if _, err := fmt.Fprintf(conn, "CONNECT %d\n", port); err != nil {
+		_ = conn.Close()
+		return bridgeDialResult{}, err
+	}
+	ack, err := br.ReadString('\n')
+	if err != nil {
+		_ = conn.Close()
+		return bridgeDialResult{}, err
+	}
+	if !strings.HasPrefix(strings.TrimSpace(ack), "OK ") {
+		_ = conn.Close()
+		return bridgeDialResult{}, fmt.Errorf("bridge CONNECT ack mismatch: %q", strings.TrimSpace(ack))
+	}
+	return bridgeDialResult{
+		Conn:  &bufferedConn{Conn: conn, r: br},
+		Stats: transportStats{Attempts: 1, HandshakeMS: time.Since(started).Milliseconds()},
+	}, nil
+}
+
+func splitCSV(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func makeRunnerDetails(runDir string, outcome vm.Outcome, trStats transportStats) map[string]any {

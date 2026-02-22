@@ -62,7 +62,7 @@ func TestRunRejectsNonPositiveTimeout(t *testing.T) {
 func TestSerialScriptWrapsMarkers(t *testing.T) {
 	t.Parallel()
 	got := serialScript("uname -a")
-	for _, want := range []string{"mount -t ext4 /dev/vdb /dev/virmux-data", "__cmd_start__", "uname -a", "__cmd_end__", "poweroff -f"} {
+	for _, want := range []string{"mount -t ext4 /dev/vdb /dev/virmux-data", "__virmux_exec_start__", "uname -a", "__virmux_exec_rc__", "poweroff -f"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("script missing marker %q: %q", want, got)
 		}
@@ -109,8 +109,34 @@ func TestValidateSerialMarkersFailurePath(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected marker validation error")
 	}
-	if !strings.Contains(err.Error(), "vm command markers missing") {
+	if !strings.Contains(err.Error(), "vm command completion marker missing") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestExtractCommandOutputIgnoresEchoedInput(t *testing.T) {
+	t.Parallel()
+	serial := strings.Join([]string{
+		"# echo __virmux_exec_start__",
+		"echo ok",
+		"printf '__virmux_exec_rc__=%s\\n' \"$__virmux_rc\"",
+		"__virmux_exec_start__",
+		"Linux host guest",
+		"ok",
+		"__virmux_exec_rc__=0",
+	}, "\n")
+	out, rc, ok := extractCommandOutput(serial)
+	if !ok {
+		t.Fatalf("expected parsed command output")
+	}
+	if rc != 0 {
+		t.Fatalf("expected rc=0 got %d", rc)
+	}
+	if strings.Contains(out, "printf '__virmux_exec_rc__") {
+		t.Fatalf("parsed echoed input instead of executed output: %q", out)
+	}
+	if !strings.Contains(out, "Linux host guest") || !strings.Contains(out, "ok") {
+		t.Fatalf("missing command output in parsed transcript: %q", out)
 	}
 }
 

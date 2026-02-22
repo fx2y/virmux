@@ -13,11 +13,19 @@ type Request struct {
 	ReqID int64          `json:"req"`
 	Tool  string         `json:"tool"`
 	Args  map[string]any `json:"args,omitempty"`
+	Allow []string       `json:"allow,omitempty"`
 }
 
 type Response struct {
-	ReqID int64 `json:"req"`
-	OK    bool  `json:"ok"`
+	ReqID     int64          `json:"req"`
+	OK        bool           `json:"ok"`
+	RC        int            `json:"rc,omitempty"`
+	StdoutRef string         `json:"stdout_ref,omitempty"`
+	StderrRef string         `json:"stderr_ref,omitempty"`
+	OHHash    string         `json:"ohash,omitempty"`
+	DurMS     int64          `json:"dur_ms,omitempty"`
+	Error     map[string]any `json:"error,omitempty"`
+	Data      map[string]any `json:"data,omitempty"`
 }
 
 var ErrReqIDInUse = errors.New("rpc req_id already inflight")
