@@ -23,8 +23,12 @@ calc_image_sha() {
   local manifest="$root/vm/image-src/manifest.json"
   local script="$root/scripts/image_build.sh"
   local inner="$root/scripts/image_build_inner.sh"
+  local source_pins
+  source_pins="$(
+    jq -r '[.kernel_sha256,.rootfs_squashfs_sha256,.firecracker_tgz_sha256] | @tsv' "$manifest"
+  )"
   local hasher_input
-  hasher_input="$(sha256sum "$manifest" "$script" "$inner" | awk '{print $1}' | tr '\n' ' ')"
+  hasher_input="$(sha256sum "$manifest" "$script" "$inner" | awk '{print $1}' | tr '\n' ' ') $source_pins"
   printf '%s' "$hasher_input" | sha256sum | awk '{print $1}'
 }
 

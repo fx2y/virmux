@@ -494,22 +494,48 @@ func persistRunArtifacts(ctx context.Context, st *store.Store, runID string, pat
 		if strings.TrimSpace(p) == "" {
 			continue
 		}
-		info, err := os.Stat(p)
+		sum, size, include, err := collectArtifactRecord(p)
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			return fmt.Errorf("stat artifact %s: %w", p, err)
+			return err
 		}
-		sum, err := fileSHA256(p)
-		if err != nil {
-			return fmt.Errorf("hash artifact %s: %w", p, err)
+		if !include {
+			continue
 		}
-		if err := st.InsertArtifact(ctx, runID, p, sum, info.Size()); err != nil {
+		if err := st.InsertArtifact(ctx, runID, p, sum, size); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func collectArtifactRecord(path string) (sha string, size int64, include bool, err error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", 0, false, nil
+		}
+		return "", 0, false, fmt.Errorf("stat artifact %s: %w", path, err)
+	}
+	mode := info.Mode()
+	if mode.IsRegular() {
+		sum, hashErr := fileSHA256(path)
+		if hashErr != nil {
+			return "", 0, false, fmt.Errorf("hash artifact %s: %w", path, hashErr)
+		}
+		return sum, info.Size(), true, nil
+	}
+	switch {
+	case mode&os.ModeSocket != 0:
+		return "meta:socket", 0, true, nil
+	case mode&os.ModeNamedPipe != 0:
+		return "meta:fifo", 0, true, nil
+	case mode&os.ModeSymlink != 0:
+		return "meta:symlink", 0, true, nil
+	case mode.IsDir():
+		return "meta:dir", 0, true, nil
+	default:
+		return fmt.Sprintf("meta:mode:%#o", uint32(mode.Type())), 0, true, nil
+	}
 }
 
 func fileSHA256(path string) (string, error) {

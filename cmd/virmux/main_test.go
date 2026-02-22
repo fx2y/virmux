@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"database/sql"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +11,7 @@ import (
 	"time"
 
 	"github.com/haris/virmux/internal/agent"
+	"github.com/haris/virmux/internal/store"
 	"github.com/haris/virmux/internal/vm"
 )
 
@@ -140,5 +144,84 @@ func TestEnsureResumeTerminalPayloadDefaults(t *testing.T) {
 	}
 	if _, ok := payload["resume_error"]; !ok {
 		t.Fatalf("expected resume_error key")
+	}
+}
+
+func TestCollectArtifactRecordSocketMetadataOnly(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	sockPath := filepath.Join(tmp, "probe.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	defer ln.Close()
+
+	sha, size, include, err := collectArtifactRecord(sockPath)
+	if err != nil {
+		t.Fatalf("collect artifact record: %v", err)
+	}
+	if !include {
+		t.Fatalf("expected socket artifact to be included")
+	}
+	if sha != "meta:socket" {
+		t.Fatalf("expected meta:socket sha, got %q", sha)
+	}
+	if size != 0 {
+		t.Fatalf("expected socket artifact size 0, got %d", size)
+	}
+}
+
+func TestPersistRunArtifactsStoresSocketMetadata(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	dbPath := filepath.Join(tmp, "virmux.sqlite")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	runID := "rid"
+	if err := st.StartRun(context.Background(), store.Run{
+		ID:        runID,
+		Task:      "vm:run",
+		Label:     "t",
+		AgentID:   "A",
+		ImageSHA:  "img",
+		KernelSHA: "k",
+		RootfsSHA: "r",
+		StartedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+
+	sockPath := filepath.Join(tmp, "art.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	defer ln.Close()
+
+	if err := persistRunArtifacts(context.Background(), st, runID, []string{sockPath}); err != nil {
+		t.Fatalf("persist artifacts: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	row := db.QueryRow(`SELECT sha256, bytes FROM artifacts WHERE run_id=? AND path=?`, runID, sockPath)
+	var sha string
+	var size int64
+	if err := row.Scan(&sha, &size); err != nil {
+		t.Fatalf("scan artifact row: %v", err)
+	}
+	if sha != "meta:socket" {
+		t.Fatalf("expected meta:socket sha, got %q", sha)
+	}
+	if size != 0 {
+		t.Fatalf("expected size 0, got %d", size)
 	}
 }

@@ -36,6 +36,12 @@ run = "./scripts/image_build.sh"
 sources = ["scripts/image_build.sh", "scripts/image_build_inner.sh", "scripts/common.sh", "vm/image-src/manifest.json"]
 outputs = [".cache/ghostfleet/images/.manifest-built"]
 
+[tasks."image:test:checksum-mismatch"]
+description = "Guard: image build hard-fails when pinned source checksums mismatch"
+run = "./scripts/test_image_checksum_mismatch.sh"
+sources = ["scripts/test_image_checksum_mismatch.sh", "scripts/image_build_inner.sh", "scripts/common.sh", "vm/image-src/manifest.json"]
+outputs = ["tmp/image-checksum-mismatch.ok"]
+
 [tasks."image:stamp"]
 description = "Write vm/images.lock from current content hash"
 depends = ["image:build"]
@@ -125,6 +131,12 @@ description = "Validate sqlite WAL/FK/index invariants"
 run = "./scripts/db_check.sh"
 sources = ["scripts/db_check.sh", "runs/virmux.sqlite"]
 outputs = ["runs/.db-check.ok"]
+
+[tasks."qa:sql-contract"]
+description = "Cohort-scoped SQL contract checks for vm:resume telemetry keys"
+run = "./scripts/sql_cert_contract.sh"
+sources = ["scripts/sql_cert_contract.sh", "scripts/common.sh", "runs/virmux.sqlite"]
+outputs = ["tmp/qa-sql-contract.ok"]
 
 [tasks."pw:install"]
 description = "Install node deps and Playwright browsers with cache"
