@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,6 +29,18 @@ type runCommon struct {
 	timeout    time.Duration
 }
 
+type runRuntime struct {
+	now   func() time.Time
+	runID func(task string, started time.Time) string
+}
+
+var defaultRunRuntime = runRuntime{
+	now: func() time.Time { return time.Now().UTC() },
+	runID: func(task string, started time.Time) string {
+		return fmt.Sprintf("%d-%s", started.UnixNano(), stringsForTask(task))
+	},
+}
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -37,9 +50,11 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: virmux <vm-smoke|vm-zygote|vm-resume|slack-server>")
+		return errors.New("usage: virmux <vm-run|vm-smoke|vm-zygote|vm-resume|slack-server>")
 	}
 	switch args[0] {
+	case "vm-run":
+		return cmdVMRun(args[1:])
 	case "vm-smoke":
 		return cmdVMSmoke(args[1:])
 	case "vm-zygote":
@@ -65,16 +80,68 @@ func commonFlags(name string) (*flag.FlagSet, *runCommon, *int) {
 	return fs, cfg, timeoutSec
 }
 
-func cmdVMSmoke(args []string) error {
-	fs, cfg, timeoutSec := commonFlags("vm-smoke")
+func parseVMRunArgs(name string, args []string, defaultCmd string) (*runCommon, string, error) {
+	fs, cfg, timeoutSec := commonFlags(name)
+	cmd := fs.String("cmd", defaultCmd, "command(s) to run in guest over ttyS0")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return nil, "", err
 	}
 	cfg.timeout = time.Duration(*timeoutSec) * time.Second
-	return runWithStore(cfg, "vm:smoke", func(ctx context.Context, art vm.Artifacts, runDir string) (vm.Outcome, map[string]any, error) {
-		outcome, err := vm.Smoke(ctx, art, runDir, cfg.memMiB, cfg.timeout)
+	command := strings.TrimSpace(*cmd)
+	if command == "" {
+		return nil, "", errors.New("--cmd cannot be empty")
+	}
+	return cfg, command, nil
+}
+
+func newVMRunRunner(cfg *runCommon, command string, requiredMarkers []string) vmRunner {
+	return func(ctx context.Context, art vm.Artifacts, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
+		var emitErr error
+		outcome, err := vm.Run(ctx, art, runDir, vm.RunConfig{
+			MemMiB:          cfg.memMiB,
+			Timeout:         cfg.timeout,
+			Command:         command,
+			RequiredMarkers: requiredMarkers,
+			EventHook: func(evt vm.Event) {
+				if emitErr != nil {
+					return
+				}
+				emitErr = emitVM(evt.Kind, evt.Payload)
+			},
+		})
+		if emitErr != nil {
+			return vm.Outcome{}, nil, emitErr
+		}
 		return outcome, map[string]any{"serial_log": filepath.Join(runDir, "serial.log")}, err
-	})
+	}
+}
+
+func cmdVMRun(args []string) error {
+	cfg, command, err := parseVMRunArgs("vm-run", args, "uname -a")
+	if err != nil {
+		return err
+	}
+	return runWithStore(
+		cfg,
+		"vm:run",
+		map[string]any{"label": cfg.label, "cmd": command},
+		newVMRunRunner(cfg, command, nil),
+		defaultRunRuntime,
+	)
+}
+
+func cmdVMSmoke(args []string) error {
+	cfg, command, err := parseVMRunArgs("vm-smoke", args, vm.DefaultSmokeCommand())
+	if err != nil {
+		return err
+	}
+	return runWithStore(
+		cfg,
+		"vm:smoke",
+		map[string]any{"label": cfg.label, "cmd": command},
+		newVMRunRunner(cfg, command, []string{"Linux", "ok"}),
+		defaultRunRuntime,
+	)
 }
 
 func cmdVMZygote(args []string) error {
@@ -85,7 +152,7 @@ func cmdVMZygote(args []string) error {
 	}
 	cfg.timeout = time.Duration(*timeoutSec) * time.Second
 
-	return runWithStore(cfg, "vm:zygote", func(ctx context.Context, art vm.Artifacts, runDir string) (vm.Outcome, map[string]any, error) {
+	return runWithStore(cfg, "vm:zygote", map[string]any{"label": cfg.label}, func(ctx context.Context, art vm.Artifacts, runDir string, _ vmEventEmitter) (vm.Outcome, map[string]any, error) {
 		base := *snapshotDir
 		if base == "" {
 			repoRoot := filepath.Dir(filepath.Dir(cfg.imagesLock))
@@ -109,7 +176,7 @@ func cmdVMZygote(args []string) error {
 			return outcome, nil, err
 		}
 		return outcome, map[string]any{"snapshot_dir": base, "mem_path": memPath, "state_path": statePath}, nil
-	})
+	}, defaultRunRuntime)
 }
 
 func cmdVMResume(args []string) error {
@@ -122,7 +189,7 @@ func cmdVMResume(args []string) error {
 	}
 	cfg.timeout = time.Duration(*timeoutSec) * time.Second
 
-	return runWithStore(cfg, "vm:resume", func(ctx context.Context, art vm.Artifacts, runDir string) (vm.Outcome, map[string]any, error) {
+	return runWithStore(cfg, "vm:resume", map[string]any{"label": cfg.label}, func(ctx context.Context, art vm.Artifacts, runDir string, _ vmEventEmitter) (vm.Outcome, map[string]any, error) {
 		mPath := *memPath
 		sPath := *statePath
 		base := *snapshotDir
@@ -168,12 +235,21 @@ func cmdVMResume(args []string) error {
 			"resume_error":   err.Error(),
 			"fallback_trace": filepath.Join(fallbackDir, "serial.log"),
 		}, nil
-	})
+	}, defaultRunRuntime)
 }
 
-type vmRunner func(ctx context.Context, art vm.Artifacts, runDir string) (vm.Outcome, map[string]any, error)
+type vmEventEmitter func(event string, payload map[string]any) error
+type vmRunner func(ctx context.Context, art vm.Artifacts, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error)
 
-func runWithStore(cfg *runCommon, task string, runner vmRunner) error {
+func runWithStore(cfg *runCommon, task string, startedPayload map[string]any, runner vmRunner, runtime runRuntime) error {
+	if runtime.now == nil {
+		runtime.now = func() time.Time { return time.Now().UTC() }
+	}
+	if runtime.runID == nil {
+		runtime.runID = func(task string, started time.Time) string {
+			return fmt.Sprintf("%d-%s", started.UnixNano(), stringsForTask(task))
+		}
+	}
 	ctx := context.Background()
 	art, err := vm.LoadArtifacts(cfg.imagesLock)
 	if err != nil {
@@ -185,7 +261,8 @@ func runWithStore(cfg *runCommon, task string, runner vmRunner) error {
 	}
 	defer st.Close()
 
-	runID := fmt.Sprintf("%d-%s", time.Now().UTC().UnixNano(), stringsForTask(task))
+	started := runtime.now().UTC()
+	runID := runtime.runID(task, started)
 	runDir := filepath.Join(cfg.runsDir, runID)
 	tracePath := filepath.Join(runDir, "trace.jsonl")
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
@@ -198,15 +275,22 @@ func runWithStore(cfg *runCommon, task string, runner vmRunner) error {
 	}
 	defer tw.Close()
 
-	started := time.Now().UTC()
 	if err := st.StartRun(ctx, store.Run{ID: runID, Task: task, Label: cfg.label, ImageSHA: art.ImageSHA, StartedAt: started}); err != nil {
 		return err
 	}
-	if err := emit(ctx, st, tw, runID, task, "run.started", map[string]any{"label": cfg.label}); err != nil {
+	if startedPayload == nil {
+		startedPayload = map[string]any{}
+	}
+	if _, ok := startedPayload["label"]; !ok {
+		startedPayload["label"] = cfg.label
+	}
+	if err := emit(ctx, st, tw, runID, task, "run.started", startedPayload, runtime.now); err != nil {
 		return err
 	}
 
-	outcome, details, runErr := runner(ctx, art, runDir)
+	outcome, details, runErr := runner(ctx, art, runDir, func(event string, payload map[string]any) error {
+		return emit(ctx, st, tw, runID, task, event, payload, runtime.now)
+	})
 	status := "ok"
 	if runErr != nil {
 		status = "failed"
@@ -223,10 +307,10 @@ func runWithStore(cfg *runCommon, task string, runner vmRunner) error {
 	for k, v := range details {
 		payload[k] = v
 	}
-	if err := emit(ctx, st, tw, runID, task, "run.finished", payload); err != nil {
+	if err := emit(ctx, st, tw, runID, task, "run.finished", payload, runtime.now); err != nil {
 		return err
 	}
-	if err := st.FinishRun(ctx, runID, status, outcome.BootMS, outcome.ResumeMS, tracePath, time.Now().UTC()); err != nil {
+	if err := st.FinishRun(ctx, runID, status, outcome.BootMS, outcome.ResumeMS, tracePath, runtime.now().UTC()); err != nil {
 		return err
 	}
 
@@ -247,12 +331,12 @@ func runWithStore(cfg *runCommon, task string, runner vmRunner) error {
 	return nil
 }
 
-func emit(ctx context.Context, st *store.Store, tw *trace.Writer, runID, task, event string, payload map[string]any) error {
+func emit(ctx context.Context, st *store.Store, tw *trace.Writer, runID, task, event string, payload map[string]any, now func() time.Time) error {
 	if err := tw.Emit(runID, task, event, payload); err != nil {
 		return err
 	}
 	data, _ := json.Marshal(payload)
-	if err := st.InsertEvent(ctx, runID, event, string(data), time.Now()); err != nil {
+	if err := st.InsertEvent(ctx, runID, event, string(data), now().UTC()); err != nil {
 		return err
 	}
 	return nil

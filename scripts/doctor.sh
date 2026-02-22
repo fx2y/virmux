@@ -36,12 +36,50 @@ if [[ -z "$fc_path" ]]; then
 fi
 pass "firecracker binary found: $fc_path"
 
-sock_dir="$root/tmp/apisock"
+lock_path="$root/vm/images.lock"
+if [[ -f "$lock_path" ]]; then
+  sha="$(tr -d '[:space:]' < "$lock_path")"
+  if [[ -z "$sha" ]]; then
+    fail "vm/images.lock is empty"
+  fi
+  image_dir="$root/.cache/ghostfleet/images/$sha"
+  for artifact in firecracker vmlinux rootfs.ext4; do
+    target="$image_dir/$artifact"
+    if [[ ! -f "$target" ]]; then
+      fail "lock-selected artifact missing: $target"
+    fi
+  done
+  pass "lock-selected artifacts exist: $image_dir/{firecracker,vmlinux,rootfs.ext4}"
+else
+  pass "vm/images.lock absent; artifact-set check skipped (bootstrap mode)"
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+  fail "python3 is required for unix socket probe"
+fi
+sock_dir="${VIRMUX_APISOCK_DIR:-$root/tmp/apisock}"
 mkdir -p "$sock_dir"
-probe="$sock_dir/doctor.sock"
-: > "$probe"
-rm -f "$probe"
-pass "api socket dir writable: $sock_dir"
+if ! VIRMUX_DOCTOR_PROBE_DIR="$sock_dir" python3 - <<'PY'
+import os
+import socket
+import tempfile
+
+sock_dir = os.environ["VIRMUX_DOCTOR_PROBE_DIR"]
+fd, path = tempfile.mkstemp(prefix="doctor.", suffix=".sock", dir=sock_dir)
+os.close(fd)
+os.unlink(path)
+s = socket.socket(socket.AF_UNIX)
+try:
+    s.bind(path)
+finally:
+    s.close()
+if os.path.exists(path):
+    os.unlink(path)
+PY
+then
+  fail "unix socket bind probe failed for dir: $sock_dir"
+fi
+pass "api socket bind/unlink probe passed: $sock_dir"
 
 nofile="$(ulimit -n)"
 min_nofile="${VIRMUX_MIN_NOFILE:-1024}"

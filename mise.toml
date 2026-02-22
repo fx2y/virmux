@@ -17,6 +17,19 @@ run = "./scripts/doctor.sh"
 sources = ["scripts/doctor.sh", "scripts/common.sh"]
 outputs = ["tmp/doctor.ok"]
 
+[tasks."doctor:test:missing-artifact"]
+description = "Guard: doctor fails when lock-selected rootfs artifact is missing"
+depends = ["image:stamp"]
+run = "./scripts/test_doctor_missing_artifact.sh"
+sources = ["scripts/test_doctor_missing_artifact.sh", "scripts/doctor.sh", "scripts/common.sh", "vm/images.lock", ".cache/ghostfleet/images/*/rootfs.ext4"]
+outputs = ["tmp/doctor-missing-artifact.ok"]
+
+[tasks."doctor:test:socket-probe"]
+description = "Guard: doctor fails when unix socket cannot be bound"
+run = "./scripts/test_doctor_socket_probe.sh"
+sources = ["scripts/test_doctor_socket_probe.sh", "scripts/doctor.sh", "scripts/common.sh"]
+outputs = ["tmp/doctor-socket-probe.ok"]
+
 [tasks."image:build"]
 description = "Build immutable image artifacts into cache by content hash"
 run = "./scripts/image_build.sh"

@@ -29,6 +29,27 @@ type Outcome struct {
 	Serial   string
 }
 
+type Event struct {
+	Kind    string
+	Payload map[string]any
+}
+
+type EventHook func(Event)
+
+type RunConfig struct {
+	MemMiB          int64
+	Timeout         time.Duration
+	Command         string
+	RequiredMarkers []string
+	EventHook       EventHook
+}
+
+const defaultSmokeCommand = "echo __virmux_smoke__\nuname -a\necho ok"
+
+func DefaultSmokeCommand() string {
+	return defaultSmokeCommand
+}
+
 func LoadArtifacts(imagesLockPath string) (Artifacts, error) {
 	raw, err := os.ReadFile(imagesLockPath)
 	if err != nil {
@@ -75,7 +96,17 @@ func (s *session) close() {
 	}
 }
 
-func startSession(ctx context.Context, art Artifacts, runDir string, memMiB int64, snapshot *firecracker.SnapshotConfig) (*session, int64, error) {
+func emitEvent(hook EventHook, kind string, payload map[string]any) {
+	if hook == nil {
+		return
+	}
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	hook(Event{Kind: kind, Payload: payload})
+}
+
+func startSession(ctx context.Context, art Artifacts, runDir string, memMiB int64, snapshot *firecracker.SnapshotConfig, eventHook EventHook) (*session, int64, error) {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		return nil, 0, fmt.Errorf("create run dir: %w", err)
 	}
@@ -128,6 +159,11 @@ func startSession(ctx context.Context, art Artifacts, runDir string, memMiB int6
 	}
 
 	started := time.Now()
+	emitEvent(eventHook, "vm.boot.started", map[string]any{
+		"socket_path": socketPath,
+		"kernel":      art.Kernel,
+		"rootfs":      art.Rootfs,
+	})
 	if err := m.Start(ctx); err != nil {
 		stdoutF.Close()
 		stderrF.Close()
@@ -145,32 +181,71 @@ func waitMachine(ctx context.Context, s *session, timeout time.Duration) error {
 	return s.machine.Wait(waitCtx)
 }
 
-func Smoke(ctx context.Context, art Artifacts, runDir string, memMiB int64, timeout time.Duration) (Outcome, error) {
-	s, bootMS, err := startSession(ctx, art, runDir, memMiB, nil)
+func serialScript(command string) string {
+	return "echo __cmd_start__\n" + command + "\necho __cmd_end__\npoweroff -f\n"
+}
+
+func Run(ctx context.Context, art Artifacts, runDir string, cfg RunConfig) (Outcome, error) {
+	command := strings.TrimSpace(cfg.Command)
+	if command == "" {
+		return Outcome{}, errors.New("vm command cannot be empty")
+	}
+	if cfg.Timeout <= 0 {
+		return Outcome{}, errors.New("vm timeout must be > 0")
+	}
+
+	s, bootMS, err := startSession(ctx, art, runDir, cfg.MemMiB, nil, cfg.EventHook)
 	if err != nil {
 		return Outcome{}, err
 	}
 	defer s.close()
 
 	time.Sleep(1500 * time.Millisecond)
-	_, _ = io.WriteString(s.stdin, "echo __virmux_smoke__\nuname -a\necho ok\npoweroff -f\n")
+	_, _ = io.WriteString(s.stdin, serialScript(command))
+	emitEvent(cfg.EventHook, "vm.exec.injected", map[string]any{
+		"command": command,
+	})
 	_ = s.stdin.Close()
 
 	time.Sleep(2 * time.Second)
 	_ = s.machine.StopVMM()
-	waitErr := waitMachine(ctx, s, timeout)
+	waitErr := waitMachine(ctx, s, cfg.Timeout)
+	exitPayload := map[string]any{}
+	if waitErr != nil {
+		exitPayload["wait_error"] = waitErr.Error()
+	}
+	emitEvent(cfg.EventHook, "vm.exit.observed", exitPayload)
+
 	serial := s.serialBuf.String()
-	if !strings.Contains(serial, "Linux") || !strings.Contains(serial, "ok") {
+	if !strings.Contains(serial, "__cmd_end__") {
 		if waitErr != nil {
-			return Outcome{}, fmt.Errorf("vm smoke output missing markers; wait err=%w", waitErr)
+			return Outcome{}, fmt.Errorf("vm command markers missing; wait err=%w", waitErr)
 		}
-		return Outcome{}, errors.New("vm smoke output missing required markers (Linux/ok)")
+		return Outcome{}, errors.New("vm command markers missing (__cmd_end__)")
+	}
+	for _, marker := range cfg.RequiredMarkers {
+		if strings.Contains(serial, marker) {
+			continue
+		}
+		if waitErr != nil {
+			return Outcome{}, fmt.Errorf("vm output missing marker %q; wait err=%w", marker, waitErr)
+		}
+		return Outcome{}, fmt.Errorf("vm output missing marker %q", marker)
 	}
 	return Outcome{BootMS: bootMS, Serial: serial}, nil
 }
 
+func Smoke(ctx context.Context, art Artifacts, runDir string, memMiB int64, timeout time.Duration) (Outcome, error) {
+	return Run(ctx, art, runDir, RunConfig{
+		MemMiB:          memMiB,
+		Timeout:         timeout,
+		Command:         defaultSmokeCommand,
+		RequiredMarkers: []string{"Linux", "ok"},
+	})
+}
+
 func Zygote(ctx context.Context, art Artifacts, runDir, snapshotDir string, memMiB int64, timeout time.Duration) (Outcome, string, string, error) {
-	s, bootMS, err := startSession(ctx, art, runDir, memMiB, nil)
+	s, bootMS, err := startSession(ctx, art, runDir, memMiB, nil, nil)
 	if err != nil {
 		return Outcome{}, "", "", err
 	}
@@ -201,7 +276,7 @@ func Resume(ctx context.Context, art Artifacts, runDir, memPath, statePath strin
 		SnapshotPath: statePath,
 		ResumeVM:     false,
 	}
-	s, resumeMS, err := startSession(ctx, art, runDir, memMiB, snap)
+	s, resumeMS, err := startSession(ctx, art, runDir, memMiB, snap, nil)
 	if err != nil {
 		return Outcome{}, err
 	}

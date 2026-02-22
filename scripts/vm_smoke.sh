@@ -5,6 +5,9 @@ source "$(dirname "$0")/common.sh"
 root="$(repo_root)"
 
 mkdir -p "$root/runs"
+if [[ "${VIRMUX_SKIP_DOCTOR:-0}" != "1" ]]; then
+  "$root/scripts/doctor.sh"
+fi
 
 go run ./cmd/virmux vm-smoke \
   --images-lock "$root/vm/images.lock" \

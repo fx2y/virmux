@@ -3,6 +3,7 @@ set -euo pipefail
 
 source "$(dirname "$0")/common.sh"
 root="$(repo_root)"
+"$root/scripts/doctor.sh"
 
 go run ./cmd/virmux vm-zygote \
   --images-lock "$root/vm/images.lock" \
