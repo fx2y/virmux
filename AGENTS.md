@@ -14,7 +14,7 @@ Deterministic Firecracker harness with replayable proof: immutable image inputs,
 ## Runtime Hard Floors
 - Host: Ubuntu 24.04 bare-metal, KVM-only, `/dev/kvm` rw.
 - VMM: Firecracker only, launched only through `firecracker-go-sdk`.
-- Topology: `cmd/virmux` thin; logic in `internal/{vm,store,trace,slack,agent,transport,agentd}`; `scripts/*` orchestration only.
+- Topology: `cmd/virmux` thin; logic in `internal/{vm,store,trace,slack,agent,transport,agentd,skill}`; `scripts/*` orchestration only.
 
 ## Plane Contracts
 - Image plane: selector is only `vm/images.lock`; cache is only `.cache/ghostfleet/images/<sha>/`; cache dirs are write-once.
