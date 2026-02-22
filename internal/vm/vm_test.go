@@ -3,6 +3,7 @@ package vm
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +13,6 @@ import (
 	"time"
 
 	firecracker "github.com/firecracker-microvm/firecracker-go-sdk"
-	models "github.com/firecracker-microvm/firecracker-go-sdk/client/models"
 )
 
 func TestLoadArtifactsRequiresFiles(t *testing.T) {
@@ -266,15 +266,31 @@ func TestWaitMachineWithWatchdogKillsUnresponsiveMachine(t *testing.T) {
 
 func TestWaitMachineWithWatchdogSkipsKillWhenProbeHealthy(t *testing.T) {
 	t.Parallel()
+	sock := filepath.Join(t.TempDir(), "fc.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	defer ln.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
 	fm := &fakeWatchdogMachine{
 		pid:      99,
 		waitErr:  context.DeadlineExceeded,
-		probeOK:  true,
 		waitDone: make(chan struct{}),
 	}
 	defer fm.unblockWait()
 	killCalled := false
-	err := waitMachineWithWatchdogDeps(context.Background(), fm, "/tmp/fc.sock", 40*time.Millisecond, nil, watchdogDeps{
+	err = waitMachineWithWatchdogDeps(context.Background(), fm, sock, 40*time.Millisecond, nil, watchdogDeps{
 		now: func() time.Time { return time.Now() },
 		kill: func(pid int, sig syscall.Signal) error {
 			killCalled = true
@@ -289,6 +305,30 @@ func TestWaitMachineWithWatchdogSkipsKillWhenProbeHealthy(t *testing.T) {
 	}
 	if killCalled {
 		t.Fatalf("watchdog should not kill healthy probe")
+	}
+	_ = ln.Close()
+	<-done
+}
+
+func TestWatchdogDepsForTimeoutPushesProbeNearDeadline(t *testing.T) {
+	t.Parallel()
+	deps := watchdogDepsForTimeout(30*time.Second, watchdogDeps{
+		probeEvery: 250 * time.Millisecond,
+		probeAfter: 3 * time.Second,
+	})
+	if deps.probeAfter != 29500*time.Millisecond {
+		t.Fatalf("expected probeAfter=29.5s, got %s", deps.probeAfter)
+	}
+}
+
+func TestWatchdogDepsForTimeoutDelaysProbeWhenTimeoutIsShort(t *testing.T) {
+	t.Parallel()
+	deps := watchdogDepsForTimeout(10*time.Millisecond, watchdogDeps{
+		probeEvery: 1 * time.Millisecond,
+		probeAfter: 7 * time.Millisecond,
+	})
+	if deps.probeAfter != 8*time.Millisecond {
+		t.Fatalf("expected probeAfter=8ms, got %s", deps.probeAfter)
 	}
 }
 
@@ -383,7 +423,6 @@ func (f *fakeBooter) Start(_ context.Context, req sessionBootRequest) (*session,
 type fakeWatchdogMachine struct {
 	pid      int
 	waitErr  error
-	probeOK  bool
 	waitDone chan struct{}
 }
 
@@ -406,13 +445,6 @@ func (f *fakeWatchdogMachine) Wait(ctx context.Context) error {
 }
 
 func (f *fakeWatchdogMachine) PID() (int, error) { return f.pid, nil }
-
-func (f *fakeWatchdogMachine) DescribeInstanceInfo(context.Context) (models.InstanceInfo, error) {
-	if f.probeOK {
-		return models.InstanceInfo{}, nil
-	}
-	return models.InstanceInfo{}, errors.New("probe timeout")
-}
 
 func (f *fakeWatchdogMachine) unblockWait() {
 	if f.waitDone == nil {

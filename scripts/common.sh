@@ -21,19 +21,39 @@ calc_image_sha() {
   local root
   root="$(repo_root)"
   local manifest="$root/vm/image-src/manifest.json"
-  local script="$root/scripts/image_build.sh"
-  local inner="$root/scripts/image_build_inner.sh"
   local source_pins
   source_pins="$(
-    jq -r '[.kernel_sha256,.rootfs_squashfs_sha256,.firecracker_tgz_sha256] | @tsv' "$manifest"
+    jq -c '{kernel_sha256,rootfs_squashfs_sha256,firecracker_tgz_sha256}' "$manifest"
   )"
-  local hasher_input
-  local agentd_hashes=""
-  if [[ -d "$root/cmd/virmux-agentd" || -d "$root/internal/agentd" ]]; then
-    agentd_hashes="$(find "$root/cmd/virmux-agentd" "$root/internal/agentd" "$root/internal/transport" -type f -name '*.go' 2>/dev/null | sort | xargs -r sha256sum | awk '{print $1}' | tr '\n' ' ')"
-  fi
-  hasher_input="$(sha256sum "$manifest" "$script" "$inner" "$root/go.mod" "$root/go.sum" | awk '{print $1}' | tr '\n' ' ') $source_pins $agentd_hashes"
-  printf '%s' "$hasher_input" | sha256sum | awk '{print $1}'
+
+  {
+    printf 'pins\0%s\0' "$source_pins"
+
+    while IFS= read -r rel; do
+      local path="$root/$rel"
+      local sum
+      sum="$(sha256sum "$path" | awk '{print $1}')"
+      printf 'file\0%s\0%s\0' "$rel" "$sum"
+    done <<'EOF'
+vm/image-src/manifest.json
+scripts/image_build.sh
+scripts/image_build_inner.sh
+go.mod
+go.sum
+EOF
+
+    if [[ -d "$root/cmd/virmux-agentd" || -d "$root/internal/agentd" ]]; then
+      find "$root/cmd/virmux-agentd" "$root/internal/agentd" "$root/internal/transport" \
+        -type f -name '*.go' -print0 2>/dev/null \
+        | sort -z \
+        | while IFS= read -r -d '' path; do
+          local rel="${path#$root/}"
+          local sum
+          sum="$(sha256sum "$path" | awk '{print $1}')"
+          printf 'agentd\0%s\0%s\0' "$rel" "$sum"
+        done
+    fi
+  } | sha256sum | awk '{print $1}'
 }
 
 image_dir() {

@@ -61,6 +61,7 @@ FROM agg;")"
 slo_samples="$(printf '%s' "$stats" | jq -r '.[0].slo_samples')"
 total_samples="$(printf '%s' "$stats" | jq -r '.[0].total_samples')"
 snapshot_resume_count="$(printf '%s' "$stats" | jq -r '.[0].snapshot_resume_count')"
+fallback_count="$(printf '%s' "$stats" | jq -r '.[0].fallback_count')"
 p50_ms="$(printf '%s' "$stats" | jq -r '.[0].p50_ms')"
 p95_ms="$(printf '%s' "$stats" | jq -r '.[0].p95_ms')"
 if [[ "$total_samples" -ne "$iterations" ]]; then
@@ -69,6 +70,14 @@ if [[ "$total_samples" -ne "$iterations" ]]; then
 fi
 if [[ "$snapshot_resume_count" -lt 1 ]]; then
   echo "bench:snapshot: no snapshot_resume samples found for label=$label" >&2
+  exit 1
+fi
+if [[ "$snapshot_resume_count" -ne "$iterations" ]]; then
+  echo "bench:snapshot: expected snapshot_resume_count=$iterations, got $snapshot_resume_count (label=$label)" >&2
+  exit 1
+fi
+if [[ "$fallback_count" -ne 0 ]]; then
+  echo "bench:snapshot: fallback_count must be 0 for perf cert, got $fallback_count (label=$label)" >&2
   exit 1
 fi
 if [[ "$slo_samples" -lt 1 ]]; then

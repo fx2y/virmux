@@ -36,11 +36,35 @@ run = "./scripts/image_build.sh"
 sources = ["scripts/image_build.sh", "scripts/image_build_inner.sh", "scripts/common.sh", "vm/image-src/manifest.json", "cmd/virmux-agentd/**/*.go", "internal/agentd/**/*.go", "internal/transport/**/*.go", "go.mod", "go.sum"]
 outputs = [".cache/ghostfleet/images/.manifest-built"]
 
+[tasks."image:seed"]
+description = "Seed immutable image cache from local artifact directory (air-gapped path)"
+run = "./scripts/image_seed.sh"
+sources = ["scripts/image_seed.sh", "scripts/common.sh", "vm/image-src/manifest.json", "scripts/image_build.sh", "scripts/image_build_inner.sh", "cmd/virmux-agentd/**/*.go", "internal/agentd/**/*.go", "internal/transport/**/*.go", "go.mod", "go.sum"]
+outputs = [".cache/ghostfleet/images/.manifest-built"]
+
 [tasks."image:test:checksum-mismatch"]
 description = "Guard: image build hard-fails when pinned source checksums mismatch"
 run = "./scripts/test_image_checksum_mismatch.sh"
 sources = ["scripts/test_image_checksum_mismatch.sh", "scripts/image_build_inner.sh", "scripts/common.sh", "vm/image-src/manifest.json"]
 outputs = ["tmp/image-checksum-mismatch.ok"]
+
+[tasks."image:test:sha-stability"]
+description = "Guard: calc_image_sha is deterministic across repeated evaluation"
+run = "./scripts/test_calc_image_sha_stability.sh"
+sources = ["scripts/test_calc_image_sha_stability.sh", "scripts/common.sh", "scripts/image_build.sh", "scripts/image_build_inner.sh", "vm/image-src/manifest.json", "cmd/virmux-agentd/**/*.go", "internal/agentd/**/*.go", "internal/transport/**/*.go", "go.mod", "go.sum"]
+outputs = ["tmp/image-sha-stability.ok"]
+
+[tasks."image:test:lock-recovery"]
+description = "Guard: stale image build lock from killed process auto-recovers"
+run = "./scripts/test_image_build_lock_recovery.sh"
+sources = ["scripts/test_image_build_lock_recovery.sh", "scripts/image_build.sh", "scripts/common.sh"]
+outputs = ["tmp/image-build-lock-recovery.ok"]
+
+[tasks."image:test:seed"]
+description = "Guard: image:seed copies local artifacts into deterministic cache layout"
+run = "./scripts/test_image_seed.sh"
+sources = ["scripts/test_image_seed.sh", "scripts/image_seed.sh", "scripts/image_build.sh", "scripts/common.sh", "vm/image-src/manifest.json", "cmd/virmux-agentd/**/*.go", "internal/agentd/**/*.go", "internal/transport/**/*.go", "go.mod", "go.sum"]
+outputs = ["tmp/image-seed.ok"]
 
 [tasks."image:stamp"]
 description = "Write vm/images.lock from current content hash"

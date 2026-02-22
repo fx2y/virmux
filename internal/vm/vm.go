@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -592,7 +593,6 @@ var (
 type watchdogMachine interface {
 	Wait(context.Context) error
 	PID() (int, error)
-	DescribeInstanceInfo(context.Context) (models.InstanceInfo, error)
 }
 
 type watchdogDeps struct {
@@ -614,7 +614,24 @@ func defaultWatchdogDeps() watchdogDeps {
 }
 
 func waitMachineWithWatchdog(ctx context.Context, s *session, timeout time.Duration, hook EventHook) error {
-	return waitMachineWithWatchdogDeps(ctx, s.machine, s.socketPath, timeout, hook, defaultWatchdogDeps())
+	return waitMachineWithWatchdogDeps(ctx, s.machine, s.socketPath, timeout, hook, watchdogDepsForTimeout(timeout, defaultWatchdogDeps()))
+}
+
+func watchdogDepsForTimeout(timeout time.Duration, deps watchdogDeps) watchdogDeps {
+	if timeout <= 0 {
+		return deps
+	}
+	if deps.probeEvery <= 0 {
+		deps.probeEvery = 250 * time.Millisecond
+	}
+	if deps.probeAfter <= 0 {
+		deps.probeAfter = 3 * time.Second
+	}
+	lateProbe := timeout - (2 * deps.probeEvery)
+	if lateProbe > deps.probeAfter {
+		deps.probeAfter = lateProbe
+	}
+	return deps
 }
 
 func waitMachineWithWatchdogDeps(ctx context.Context, m watchdogMachine, socketPath string, timeout time.Duration, hook EventHook, deps watchdogDeps) error {
@@ -657,9 +674,7 @@ func waitMachineWithWatchdogDeps(ctx context.Context, m watchdogMachine, socketP
 			if killed || deps.now().Sub(started) < deps.probeAfter {
 				continue
 			}
-			probeCtx, probeCancel := context.WithTimeout(context.Background(), deps.probeTTL)
-			_, probeErr := m.DescribeInstanceInfo(probeCtx)
-			probeCancel()
+			probeErr := probeAPISocket(socketPath, deps.probeTTL)
 			if probeErr == nil {
 				continue
 			}
@@ -680,6 +695,21 @@ func waitMachineWithWatchdogDeps(ctx context.Context, m watchdogMachine, socketP
 			})
 		}
 	}
+}
+
+func probeAPISocket(socketPath string, timeout time.Duration) error {
+	if strings.TrimSpace(socketPath) == "" {
+		return errors.New("empty socket path")
+	}
+	if timeout <= 0 {
+		timeout = 250 * time.Millisecond
+	}
+	conn, err := net.DialTimeout("unix", socketPath, timeout)
+	if err != nil {
+		return err
+	}
+	_ = conn.Close()
+	return nil
 }
 
 func processAlive(pid int) bool {
