@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -23,6 +24,8 @@ import (
 	"github.com/haris/virmux/internal/trace"
 	"github.com/haris/virmux/internal/vm"
 )
+
+var skillNameArgRE = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 
 func cmdSkill(args []string) error {
 	if len(args) == 0 {
@@ -116,7 +119,13 @@ func cmdSkillRun(args []string) error {
 	}
 
 	name, ref := splitSkillRef(skillRef)
-	dir := filepath.Join(*skillsRoot, name)
+	if !skillNameArgRE.MatchString(name) {
+		return fmt.Errorf("SKILL_PATH_ESCAPE: invalid skill name %q (expected kebab-case token)", name)
+	}
+	dir, err := safeJoin(*skillsRoot, name)
+	if err != nil {
+		return fmt.Errorf("SKILL_PATH_ESCAPE: %w", err)
+	}
 	ee := skillspec.DefaultEligibilityEnv()
 	skillDef, err := skillspec.LoadDir(dir, ee)
 	if err != nil {
@@ -153,18 +162,24 @@ func cmdSkillRun(args []string) error {
 	if err := applyFixtureToolArgs(cfg, fx, bgt); err != nil {
 		return err
 	}
+	fp, err := buildSkillFingerprints(skillDef)
+	if err != nil {
+		return err
+	}
 	task := "skill:run"
 	startedPayload := map[string]any{
-		"label":       cfg.label,
-		"skill":       skillDef.Meta.Name,
-		"skill_ref":   skillRef,
-		"skill_sha":   localSkillSHA(dir),
-		"skill_dir":   filepath.ToSlash(dir),
-		"git_ref":     ref,
-		"fixture":     filepath.ToSlash(fxPath),
-		"fixture_id":  fx.ID,
-		"dormant":     false,
-		"allow_tools": skillDef.Tools.AllowedTools,
+		"label":         cfg.label,
+		"skill":         skillDef.Meta.Name,
+		"skill_ref":     skillRef,
+		"skill_sha":     fp.SkillSHA,
+		"prompt_fp":     fp.PromptFingerprint,
+		"skill_base_fp": fp.SkillBaseFingerprint,
+		"skill_dir":     filepath.ToSlash(dir),
+		"git_ref":       ref,
+		"fixture":       filepath.ToSlash(fxPath),
+		"fixture_id":    fx.ID,
+		"dormant":       false,
+		"allow_tools":   skillDef.Tools.AllowedTools,
 		"budget": map[string]any{
 			"tool_calls": bgt.ToolCalls,
 			"seconds":    bgt.Seconds,
@@ -172,7 +187,7 @@ func cmdSkillRun(args []string) error {
 		},
 	}
 	inner := newVMRunRunner(cfg, fixtureCommandLabel(fx), nil)
-	runner := wrapSkillRunner(inner, skillDef, skillRef, fxPath, fx)
+	runner := wrapSkillRunner(inner, skillDef, fp, skillRef, fxPath, fx)
 	return runWithStore(cfg, task, startedPayload, runner, defaultRunRuntime)
 }
 
@@ -211,7 +226,13 @@ func cmdSkillReplay(args []string) error {
 	return nil
 }
 
+type skillEventEmitter func(ctx context.Context, st *store.Store, tw *trace.Writer, runID, task, event string, payload map[string]any, now func() time.Time) error
+
 func cmdSkillJudge(args []string) error {
+	return cmdSkillJudgeWithEmitter(args, emit)
+}
+
+func cmdSkillJudgeWithEmitter(args []string, emitEvent skillEventEmitter) error {
 	fs := flag.NewFlagSet("skill judge", flag.ContinueOnError)
 	runsDir := fs.String("runs-dir", "runs", "runs directory")
 	dbPath := fs.String("db", "runs/virmux.sqlite", "sqlite db path")
@@ -262,11 +283,13 @@ func cmdSkillJudge(args []string) error {
 	defer tw.Close()
 
 	ctx := context.Background()
-	_ = emit(ctx, st, tw, runID, task, "skill.judge.started", map[string]any{
+	if err := emitEvent(ctx, st, tw, runID, task, "skill.judge.started", map[string]any{
 		"skill":       skillName,
 		"rubric":      filepath.ToSlash(rubric),
 		"rubric_hash": rubricHash,
-	}, time.Now)
+	}, time.Now); err != nil {
+		return err
+	}
 	res, err := skilljudge.Evaluate(r, rubricHash, skilljudge.Evidence{
 		RunID:       runID,
 		Skill:       skillName,
@@ -321,7 +344,7 @@ func cmdSkillJudge(args []string) error {
 	}); err != nil {
 		return err
 	}
-	if err := emit(ctx, st, tw, runID, task, "skill.judge.scored", map[string]any{
+	if err := emitEvent(ctx, st, tw, runID, task, "skill.judge.scored", map[string]any{
 		"skill":          skillName,
 		"score":          res.Score,
 		"pass":           res.Pass,
@@ -413,7 +436,13 @@ func fixtureCommandLabel(fx skillrun.Fixture) string {
 	return fmt.Sprintf("skill fixture tool=%s", fx.Tool)
 }
 
-func wrapSkillRunner(inner vmRunner, skillDef skillspec.Skill, skillRef, fixturePath string, fx skillrun.Fixture) vmRunner {
+type skillFingerprints struct {
+	SkillSHA             string
+	PromptFingerprint    string
+	SkillBaseFingerprint string
+}
+
+func wrapSkillRunner(inner vmRunner, skillDef skillspec.Skill, fp skillFingerprints, skillRef, fixturePath string, fx skillrun.Fixture) vmRunner {
 	return func(ctx context.Context, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
 		details := map[string]any{}
 		if err := emitVM("skill.run.selected", map[string]any{
@@ -425,7 +454,7 @@ func wrapSkillRunner(inner vmRunner, skillDef skillspec.Skill, skillRef, fixture
 		}); err != nil {
 			return vm.Outcome{}, details, err
 		}
-		metaPath, err := writeSkillRunMeta(runDir, skillDef, skillRef, fixturePath, fx)
+		metaPath, err := writeSkillRunMeta(runDir, skillDef, fp, skillRef, fixturePath, fx)
 		if err == nil {
 			details["skill_meta_path"] = metaPath
 		}
@@ -472,12 +501,21 @@ func wrapSkillRunner(inner vmRunner, skillDef skillspec.Skill, skillRef, fixture
 	}
 }
 
-func writeSkillRunMeta(runDir string, skillDef skillspec.Skill, skillRef, fixturePath string, fx skillrun.Fixture) (string, error) {
+func writeSkillRunMeta(runDir string, skillDef skillspec.Skill, fp skillFingerprints, skillRef, fixturePath string, fx skillrun.Fixture) (string, error) {
 	expectFiles := extractFixtureExpectFiles(fx.Expect)
+	if fp.SkillSHA == "" || fp.PromptFingerprint == "" || fp.SkillBaseFingerprint == "" {
+		next, err := buildSkillFingerprints(skillDef)
+		if err != nil {
+			return "", err
+		}
+		fp = next
+	}
 	out := map[string]any{
 		"skill":         skillDef.Meta.Name,
 		"skill_ref":     skillRef,
-		"skill_sha":     localSkillSHA(skillDef.Dir),
+		"skill_sha":     fp.SkillSHA,
+		"prompt_fp":     fp.PromptFingerprint,
+		"skill_base_fp": fp.SkillBaseFingerprint,
 		"fixture":       filepath.ToSlash(fixturePath),
 		"fixture_id":    fx.ID,
 		"tool":          fx.Tool,
@@ -521,38 +559,102 @@ func runSkillBudgetFailure(cfg *runCommon, skillDef skillspec.Skill, fixturePath
 	if cfg == nil {
 		return budgetErr
 	}
-	// Reuse the existing evidence plane even for preflight policy failures.
-	runner := func(ctx context.Context, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
-		details := map[string]any{}
-		if p, err := writeSkillRunMeta(runDir, skillDef, skillDef.Meta.Name, fixturePath, fx); err == nil {
-			details["skill_meta_path"] = p
-		}
-		if p, err := skillrun.EnsureScorePlaceholder(runDir, map[string]any{"status": "blocked", "error_code": "BUDGET_EXCEEDED", "error": budgetErr.Error()}); err == nil {
-			details["score_path"] = p
-		}
-		_ = emitVM("skill.run.selected", map[string]any{"skill": skillDef.Meta.Name, "fixture": filepath.ToSlash(fixturePath), "tool": fx.Tool})
-		_ = emitVM("skill.budget.exceeded", map[string]any{"error_code": "BUDGET_EXCEEDED", "error": budgetErr.Error()})
-		return vm.Outcome{}, details, budgetErr
+	st, err := store.Open(cfg.dbPath)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	now := time.Now().UTC()
+	runID := defaultRunRuntime.runID("skill:run", now)
+	runDir := filepath.Join(cfg.runsDir, runID)
+	tracePath, traceCompatPath, metaPath, err := prepareRunFiles(runDir, runID, "skill:run", now)
+	if err != nil {
+		return err
+	}
+	tw, err := trace.NewWriter(tracePath)
+	if err != nil {
+		return err
+	}
+	defer tw.Close()
+	ctx := context.Background()
+	if err := st.StartRun(ctx, store.Run{
+		ID:        runID,
+		Task:      "skill:run",
+		Label:     cfg.label,
+		AgentID:   cfg.agentID,
+		ImageSHA:  "preflight:budget",
+		KernelSHA: "",
+		RootfsSHA: "",
+		StartedAt: now,
+	}); err != nil {
+		return err
 	}
 	startedPayload := map[string]any{
+		"label":      cfg.label,
+		"agent_id":   cfg.agentID,
 		"skill":      skillDef.Meta.Name,
 		"fixture":    filepath.ToSlash(fixturePath),
 		"fixture_id": fx.ID,
-		"budget": map[string]any{
-			"tool_calls": skillDef.Tools.Budget.ToolCalls,
-			"seconds":    skillDef.Tools.Budget.Seconds,
-			"tokens":     skillDef.Tools.Budget.Tokens,
-		},
 	}
-	return runWithStore(cfg, "skill:run", startedPayload, runner, defaultRunRuntime)
+	if err := emit(ctx, st, tw, runID, "skill:run", "run.started", startedPayload, time.Now); err != nil {
+		_ = st.FinishRun(ctx, runID, "failed", 0, 0, tracePath, "", 0, time.Now().UTC())
+		return err
+	}
+	fp, err := buildSkillFingerprints(skillDef)
+	if err != nil {
+		return err
+	}
+	details := map[string]any{}
+	if p, err := writeSkillRunMeta(runDir, skillDef, fp, skillDef.Meta.Name, fixturePath, fx); err != nil {
+		return err
+	} else {
+		details["skill_meta_path"] = p
+	}
+	if p, err := skillrun.EnsureScorePlaceholder(runDir, map[string]any{"status": "blocked", "error_code": "BUDGET_EXCEEDED", "error": budgetErr.Error()}); err != nil {
+		return err
+	} else {
+		details["score_path"] = p
+	}
+	if err := emit(ctx, st, tw, runID, "skill:run", "skill.run.selected", map[string]any{"skill": skillDef.Meta.Name, "fixture": filepath.ToSlash(fixturePath), "tool": fx.Tool}, time.Now); err != nil {
+		return err
+	}
+	if err := emit(ctx, st, tw, runID, "skill:run", "skill.budget.exceeded", map[string]any{"error_code": "BUDGET_EXCEEDED", "error": budgetErr.Error()}, time.Now); err != nil {
+		return err
+	}
+	payload := map[string]any{
+		"status": "failed",
+	}
+	for k, v := range details {
+		payload[k] = v
+	}
+	addFailurePayload(payload, budgetErr)
+	if err := emit(ctx, st, tw, runID, "skill:run", "run.finished", payload, time.Now); err != nil {
+		return err
+	}
+	if err := st.FinishRun(ctx, runID, "failed", 0, 0, tracePath, "", 0, time.Now().UTC()); err != nil {
+		return err
+	}
+	if err := persistRunArtifacts(ctx, st, runID, []string{
+		tracePath,
+		traceCompatPath,
+		metaPath,
+		stringDetail(details, "score_path"),
+		stringDetail(details, "skill_meta_path"),
+	}); err != nil {
+		return err
+	}
+	if exportErr := maybeAutoExportFailure(ctx, cfg, st, tw, time.Now, runID, "skill:run", "failed"); exportErr != nil {
+		return exportErr
+	}
+	return budgetErr
 }
 
-func localSkillSHA(dir string) string {
-	h := []byte(strings.TrimSpace(dir))
+func localSkillSHA(dir string) (string, error) {
+	h := make([]byte, 0, 1024)
 	for _, rel := range []string{"SKILL.md", "tools.yaml", "rubric.yaml"} {
 		b, err := os.ReadFile(filepath.Join(dir, rel))
 		if err != nil {
-			continue
+			return "", fmt.Errorf("read required skill file %s: %w", rel, err)
 		}
 		h = append(h, '\x00')
 		h = append(h, []byte(rel)...)
@@ -560,17 +662,38 @@ func localSkillSHA(dir string) string {
 		h = append(h, b...)
 	}
 	sum := sha256.Sum256(h)
-	return fmt.Sprintf("%x", sum[:])
+	return fmt.Sprintf("%x", sum[:]), nil
+}
+
+func buildSkillFingerprints(skillDef skillspec.Skill) (skillFingerprints, error) {
+	skillSHA, err := localSkillSHA(skillDef.Dir)
+	if err != nil {
+		return skillFingerprints{}, err
+	}
+	promptSum := sha256.Sum256([]byte(strings.TrimSpace(skillDef.Body) + "\x00"))
+	skillBytes, err := os.ReadFile(skillDef.Path)
+	if err != nil {
+		return skillFingerprints{}, fmt.Errorf("read %s: %w", skillDef.Path, err)
+	}
+	baseSum := sha256.Sum256(skillBytes)
+	return skillFingerprints{
+		SkillSHA:             skillSHA,
+		PromptFingerprint:    fmt.Sprintf("%x", promptSum[:]),
+		SkillBaseFingerprint: fmt.Sprintf("%x", baseSum[:]),
+	}, nil
 }
 
 type skillRunMeta struct {
-	Skill         string         `json:"skill"`
-	Fixture       string         `json:"fixture"`
-	Tool          string         `json:"tool"`
-	Deterministic bool           `json:"deterministic"`
-	Expect        map[string]any `json:"expect,omitempty"`
-	ToolCalls     int            `json:"tool_calls,omitempty"`
-	ExpectFiles   []string       `json:"expect_files,omitempty"`
+	Skill                string         `json:"skill"`
+	SkillSHA             string         `json:"skill_sha,omitempty"`
+	PromptFingerprint    string         `json:"prompt_fp,omitempty"`
+	SkillBaseFingerprint string         `json:"skill_base_fp,omitempty"`
+	Fixture              string         `json:"fixture"`
+	Tool                 string         `json:"tool"`
+	Deterministic        bool           `json:"deterministic"`
+	Expect               map[string]any `json:"expect,omitempty"`
+	ToolCalls            int            `json:"tool_calls,omitempty"`
+	ExpectFiles          []string       `json:"expect_files,omitempty"`
 }
 
 func readSkillRunMeta(runDir string) (skillRunMeta, error) {
@@ -635,6 +758,9 @@ func cmdSkillAB(args []string) error {
 	if skillName == "" {
 		return errors.New("skill name cannot be empty")
 	}
+	if !skillNameArgRE.MatchString(skillName) {
+		return fmt.Errorf("SKILL_PATH_ESCAPE: invalid skill name %q (expected kebab-case token)", skillName)
+	}
 	baseRef := ""
 	headRef := ""
 	if len(pos) == 2 {
@@ -673,6 +799,8 @@ func cmdSkillAB(args []string) error {
 	if err := skilleval.ValidateFrozenFixtureSet(headSnap.Fixtures, baseSnap.Fixtures); err != nil {
 		return fmt.Errorf("frozen fixture set violation: %w", err)
 	}
+	baseSnapFrozen := baseSnap
+	baseSnapFrozen.Fixtures = append([]skilleval.Fixture(nil), headSnap.Fixtures...)
 	evalID := fmt.Sprintf("%d-skillab", time.Now().UTC().UnixNano())
 	evalDir := filepath.Join(*runsDir, evalID)
 	if err := os.MkdirAll(evalDir, 0o755); err != nil {
@@ -680,7 +808,7 @@ func cmdSkillAB(args []string) error {
 	}
 	baseCfgPath := filepath.Join(evalDir, "promptfoo.base.json")
 	headCfgPath := filepath.Join(evalDir, "promptfoo.head.json")
-	baseCfg, err := skilleval.BuildPromptfooConfig(baseSnap, *provider)
+	baseCfg, err := skilleval.BuildPromptfooConfig(baseSnapFrozen, *provider)
 	if err != nil {
 		return err
 	}
@@ -709,6 +837,28 @@ func cmdSkillAB(args []string) error {
 	}
 	headRaw, err := os.ReadFile(headResPath)
 	if err != nil {
+		return err
+	}
+	cfgBundlePath := filepath.Join(evalDir, "promptfoo.cfg.bundle.json")
+	cfgBundle, _ := json.MarshalIndent(map[string]any{
+		"base_cfg_path": filepath.ToSlash(filepath.Join(evalID, "promptfoo.base.json")),
+		"head_cfg_path": filepath.ToSlash(filepath.Join(evalID, "promptfoo.head.json")),
+		"base":          json.RawMessage(baseCfg),
+		"head":          json.RawMessage(headCfg),
+	}, "", "  ")
+	cfgBundleBytes := append(cfgBundle, '\n')
+	if err := os.WriteFile(cfgBundlePath, cfgBundleBytes, 0o644); err != nil {
+		return err
+	}
+	resultsBundlePath := filepath.Join(evalDir, "promptfoo.results.bundle.json")
+	resultsBundle, _ := json.MarshalIndent(map[string]any{
+		"base_results_path": filepath.ToSlash(filepath.Join(evalID, "promptfoo.base.results.json")),
+		"head_results_path": filepath.ToSlash(filepath.Join(evalID, "promptfoo.head.results.json")),
+		"base":              json.RawMessage(baseRaw),
+		"head":              json.RawMessage(headRaw),
+	}, "", "  ")
+	resultsBundleBytes := append(resultsBundle, '\n')
+	if err := os.WriteFile(resultsBundlePath, resultsBundleBytes, 0o644); err != nil {
 		return err
 	}
 	ids := make([]string, 0, len(headSnap.Fixtures))
@@ -747,12 +897,13 @@ func cmdSkillAB(args []string) error {
 		},
 	}
 	vb, _ := json.MarshalIndent(verdictDoc, "", "  ")
-	if err := os.WriteFile(verdictPath, append(vb, '\n'), 0o644); err != nil {
+	verdictBytes := append(vb, '\n')
+	if err := os.WriteFile(verdictPath, verdictBytes, 0o644); err != nil {
 		return err
 	}
-	cfgSum := sha256.Sum256(append(baseCfg, headCfg...))
-	resSum := sha256.Sum256(append(baseRaw, headRaw...))
-	verdictSum := sha256.Sum256(vb)
+	cfgSum := sha256.Sum256(cfgBundleBytes)
+	resSum := sha256.Sum256(resultsBundleBytes)
+	verdictSum := sha256.Sum256(verdictBytes)
 	ctx = context.Background()
 	if err := st.InsertEvalRun(ctx, store.EvalRun{
 		ID:            evalID,
@@ -763,9 +914,9 @@ func cmdSkillAB(args []string) error {
 		Provider:      *provider,
 		FixturesHash:  skilleval.FixtureSetHash(headSnap.Fixtures),
 		CfgSHA256:     fmt.Sprintf("%x", cfgSum[:]),
-		CfgPath:       filepath.ToSlash(filepath.Join(evalID, "promptfoo.head.json")),
+		CfgPath:       filepath.ToSlash(filepath.Join(evalID, "promptfoo.cfg.bundle.json")),
 		ResultsSHA256: fmt.Sprintf("%x", resSum[:]),
-		ResultsPath:   filepath.ToSlash(filepath.Join(evalID, "promptfoo.head.results.json")),
+		ResultsPath:   filepath.ToSlash(filepath.Join(evalID, "promptfoo.results.bundle.json")),
 		VerdictSHA256: fmt.Sprintf("%x", verdictSum[:]),
 		VerdictPath:   filepath.ToSlash(filepath.Join(evalID, "ab-verdict.json")),
 		ScoreP50Base:  baseMetrics.ScoreP50,

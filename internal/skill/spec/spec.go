@@ -238,9 +238,21 @@ func LoadTools(path string) (ToolsConfig, error) {
 				return ToolsConfig{}, fmt.Errorf("unknown tools.yaml budget key: %s", k)
 			}
 		}
-		tools.Budget.ToolCalls = int(int64FromAny(bm["tool_calls"]))
-		tools.Budget.Seconds = int(int64FromAny(bm["seconds"]))
-		tools.Budget.Tokens = int(int64FromAny(bm["tokens"]))
+		toolCalls, err := intBudgetField(bm, "tool_calls")
+		if err != nil {
+			return ToolsConfig{}, err
+		}
+		seconds, err := intBudgetField(bm, "seconds")
+		if err != nil {
+			return ToolsConfig{}, err
+		}
+		tokens, err := intBudgetField(bm, "tokens")
+		if err != nil {
+			return ToolsConfig{}, err
+		}
+		tools.Budget.ToolCalls = toolCalls
+		tools.Budget.Seconds = seconds
+		tools.Budget.Tokens = tokens
 		if tools.Budget.ToolCalls < 0 || tools.Budget.Seconds < 0 || tools.Budget.Tokens < 0 {
 			return ToolsConfig{}, errors.New("tools.yaml budget values must be >= 0")
 		}
@@ -401,17 +413,36 @@ func normalizeYAML(v any) any {
 	}
 }
 
-func int64FromAny(v any) int64 {
+func intBudgetField(m map[string]any, key string) (int, error) {
+	v, ok := m[key]
+	if !ok {
+		return 0, fmt.Errorf("tools.yaml budget missing key: %s", key)
+	}
 	switch x := v.(type) {
 	case int:
-		return int64(x)
+		return x, nil
+	case int32:
+		return int(x), nil
 	case int64:
-		return x
+		return int(x), nil
+	case uint:
+		return int(x), nil
+	case uint32:
+		return int(x), nil
 	case uint64:
-		return int64(x)
+		return int(x), nil
 	case float64:
-		return int64(x)
+		if x != float64(int64(x)) {
+			return 0, fmt.Errorf("tools.yaml budget key %s must be integer", key)
+		}
+		return int(x), nil
+	case float32:
+		f := float64(x)
+		if f != float64(int64(f)) {
+			return 0, fmt.Errorf("tools.yaml budget key %s must be integer", key)
+		}
+		return int(f), nil
 	default:
-		return 0
+		return 0, fmt.Errorf("tools.yaml budget key %s must be integer", key)
 	}
 }

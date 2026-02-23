@@ -165,6 +165,18 @@ func TestStoreSchemaAndFK(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("insert refine_run: %v", err)
 	}
+	if err := s.InsertSuggestRun(ctx, SuggestRun{
+		ID:         "sug-1",
+		Skill:      "suggest-dd-a1b2",
+		MotifKey:   "motif",
+		Branch:     "suggest/dd-a1b2",
+		CommitSHA:  "def456",
+		PRBodyHash: "sha256:pr",
+		PRBodyPath: "runs/sug-1/suggest-pr.md",
+		RunIDsJSON: `["run-1"]`,
+	}); err != nil {
+		t.Fatalf("insert suggest_run: %v", err)
+	}
 	var idxCount int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_artifacts_run_id'`).Scan(&idxCount); err != nil {
 		t.Fatalf("query artifacts index: %v", err)
@@ -214,6 +226,12 @@ func TestStoreSchemaAndFK(t *testing.T) {
 	if idxCount != 1 {
 		t.Fatalf("expected idx_refine_runs_run_created, got %d", idxCount)
 	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_suggest_runs_skill_created'`).Scan(&idxCount); err != nil {
+		t.Fatalf("query suggest_runs index: %v", err)
+	}
+	if idxCount != 1 {
+		t.Fatalf("expected idx_suggest_runs_skill_created, got %d", idxCount)
+	}
 }
 
 func TestOpenMigratesLegacyRunsTable(t *testing.T) {
@@ -255,7 +273,7 @@ CREATE TABLE runs (
 			t.Fatalf("missing migrated column %s", col)
 		}
 	}
-	for _, tbl := range []string{"tool_calls", "scores", "judge_runs", "eval_runs", "eval_cases", "promotions", "refine_runs"} {
+	for _, tbl := range []string{"tool_calls", "scores", "judge_runs", "eval_runs", "eval_cases", "promotions", "refine_runs", "suggest_runs"} {
 		var n int
 		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, tbl).Scan(&n); err != nil {
 			t.Fatalf("query table %s: %v", tbl, err)

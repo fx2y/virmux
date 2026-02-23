@@ -14,21 +14,22 @@ import (
 )
 
 type Entry struct {
-	TS        string         `json:"ts"`
-	RunID     string         `json:"run_id"`
-	Seq       int64          `json:"seq"`
-	Type      string         `json:"type,omitempty"`
-	Task      string         `json:"task"`
-	Event     string         `json:"event"`
-	Tool      string         `json:"tool,omitempty"`
-	ArgsHash  string         `json:"args_hash,omitempty"`
-	StdoutRef string         `json:"stdout_ref,omitempty"`
-	StderrRef string         `json:"stderr_ref,omitempty"`
-	ExitCode  *int           `json:"exit_code,omitempty"`
-	DurMS     *int64         `json:"dur_ms,omitempty"`
-	BytesIn   *int64         `json:"bytes_in,omitempty"`
-	BytesOut  *int64         `json:"bytes_out,omitempty"`
-	Payload   map[string]any `json:"payload"`
+	TS         string         `json:"ts"`
+	RunID      string         `json:"run_id"`
+	Seq        int64          `json:"seq"`
+	Type       string         `json:"type,omitempty"`
+	Task       string         `json:"task"`
+	Event      string         `json:"event"`
+	Tool       string         `json:"tool,omitempty"`
+	ArgsHash   string         `json:"args_hash,omitempty"`
+	OutputHash string         `json:"output_hash,omitempty"`
+	StdoutRef  string         `json:"stdout_ref,omitempty"`
+	StderrRef  string         `json:"stderr_ref,omitempty"`
+	ExitCode   *int           `json:"exit_code,omitempty"`
+	DurMS      *int64         `json:"dur_ms,omitempty"`
+	BytesIn    *int64         `json:"bytes_in,omitempty"`
+	BytesOut   *int64         `json:"bytes_out,omitempty"`
+	Payload    map[string]any `json:"payload"`
 }
 
 type Writer struct {
@@ -85,6 +86,7 @@ func (w *Writer) Emit(runID, task, event string, payload map[string]any) error {
 		entry.Type = "tool"
 		entry.Tool = tr.Tool
 		entry.ArgsHash = tr.InputHash
+		entry.OutputHash = tr.OutputHash
 		entry.StdoutRef = tr.StdoutRef
 		entry.StderrRef = tr.StderrRef
 		entry.ExitCode = intPtr(tr.RC)
@@ -117,7 +119,7 @@ func ValidateLine(data []byte) error {
 		return fmt.Errorf("missing type")
 	}
 	if e.Type == "tool" {
-		if e.Tool == "" || e.ArgsHash == "" || e.ExitCode == nil || e.DurMS == nil || e.BytesIn == nil || e.BytesOut == nil {
+		if e.Tool == "" || e.ArgsHash == "" || e.OutputHash == "" || e.ExitCode == nil || e.DurMS == nil || e.BytesIn == nil || e.BytesOut == nil {
 			return fmt.Errorf("missing tool receipt field")
 		}
 		if e.StdoutRef == "" || e.StderrRef == "" {

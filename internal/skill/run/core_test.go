@@ -225,6 +225,148 @@ func TestCompareReplayHashesMismatchIncludesFirstDivergence(t *testing.T) {
 	}
 }
 
+func TestVerifyReplayHashesDetectsTraceOutputHashMismatch(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	runsDir := filepath.Join(tmp, "runs")
+	runID := "r1"
+	runDir := filepath.Join(runsDir, runID)
+	if err := os.MkdirAll(filepath.Join(runDir, "toolio"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reqBytes := mustJSON(t, map[string]any{"req": 1, "tool": "shell.exec", "args": map[string]any{"cmd": "echo ok"}})
+	resBytes := mustJSON(t, map[string]any{"req": 1, "ok": true})
+	writeNL(t, filepath.Join(runDir, "toolio", "000001.req.json"), reqBytes)
+	writeNL(t, filepath.Join(runDir, "toolio", "000001.res.json"), resBytes)
+	tw, err := trace.NewWriter(filepath.Join(runDir, "trace.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Emit(runID, "skill:run", "vm.tool.result", map[string]any{
+		"tool_seq":    1,
+		"req":         1,
+		"tool":        "shell.exec",
+		"input_hash":  trace.SHA256Hex(reqBytes),
+		"output_hash": "sha256:not-the-db-hash",
+		"stdout_ref":  "artifacts/1.out",
+		"stderr_ref":  "artifacts/1.err",
+		"exit_code":   0,
+		"dur_ms":      int64(1),
+		"bytes_in":    int64(len(reqBytes)),
+		"bytes_out":   int64(len(resBytes)),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(runsDir, "virmux.sqlite")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	if err := st.StartRun(ctx, store.Run{ID: runID, Task: "skill:run", AgentID: "default", ImageSHA: "img", KernelSHA: "k", RootfsSHA: "r", StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertToolCall(ctx, store.ToolCall{
+		RunID:      runID,
+		Seq:        1,
+		ReqID:      1,
+		Tool:       "shell.exec",
+		InputHash:  trace.SHA256Hex(reqBytes),
+		OutputHash: trace.SHA256Hex(resBytes),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = VerifyReplayHashes(dbPath, runDir, runID)
+	if err == nil || !strings.Contains(err.Error(), "trace") {
+		t.Fatalf("expected trace output mismatch, got %v", err)
+	}
+}
+
+func TestCompareReplayHashesDetectsScoreArtifactDivergence(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	runsDir := filepath.Join(tmp, "runs")
+	dbPath := filepath.Join(runsDir, "virmux.sqlite")
+	if err := os.MkdirAll(runsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	makeRun := func(runID string, score float64) {
+		runDir := filepath.Join(runsDir, runID)
+		if err := os.MkdirAll(filepath.Join(runDir, "toolio"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		req := mustJSON(t, map[string]any{"req": 1, "tool": "shell.exec", "args": map[string]any{"cmd": "echo ok"}})
+		res := mustJSON(t, map[string]any{"req": 1, "ok": true})
+		writeNL(t, filepath.Join(runDir, "toolio", "000001.req.json"), req)
+		writeNL(t, filepath.Join(runDir, "toolio", "000001.res.json"), res)
+		if err := os.WriteFile(filepath.Join(runDir, "skill-run.json"), []byte(`{"deterministic":true}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		scoreDoc := map[string]any{"score": score}
+		sb, _ := json.Marshal(scoreDoc)
+		if err := os.WriteFile(filepath.Join(runDir, "score.json"), append(sb, '\n'), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tw, err := trace.NewWriter(filepath.Join(runDir, "trace.ndjson"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := tw.Emit(runID, "skill:run", "vm.tool.result", map[string]any{
+			"tool_seq":    1,
+			"req":         1,
+			"tool":        "shell.exec",
+			"input_hash":  trace.SHA256Hex(req),
+			"output_hash": trace.SHA256Hex(res),
+			"stdout_ref":  "artifacts/1.out",
+			"stderr_ref":  "artifacts/1.err",
+			"exit_code":   0,
+			"dur_ms":      int64(1),
+			"bytes_in":    int64(len(req)),
+			"bytes_out":   int64(len(res)),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.StartRun(ctx, store.Run{ID: runID, Task: "skill:run", AgentID: "default", ImageSHA: "img", KernelSHA: "k", RootfsSHA: "r", StartedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.InsertToolCall(ctx, store.ToolCall{
+			RunID:      runID,
+			Seq:        1,
+			ReqID:      1,
+			Tool:       "shell.exec",
+			InputHash:  trace.SHA256Hex(req),
+			OutputHash: trace.SHA256Hex(res),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.InsertArtifact(ctx, runID, "score.json", trace.SHA256Hex(append(sb, '\n')), int64(len(sb)+1)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	makeRun("r1", 0.8)
+	makeRun("r2", 0.1)
+	rep, err := CompareReplayHashes(dbPath, runsDir, "r1", "r2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Verified || !strings.Contains(rep.Mismatch, "artifact divergence") {
+		t.Fatalf("expected artifact mismatch on score.json, got %+v", rep)
+	}
+}
+
 func mustJSON(t *testing.T, v any) []byte {
 	t.Helper()
 	b, err := json.Marshal(v)

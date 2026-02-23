@@ -181,7 +181,7 @@ func VerifyReplayHashes(dbPath, runDir, runID string) (ReplayReport, error) {
 		if d.Seq != f.Seq || d.Tool != f.Tool || d.InputHash != f.InputHash || d.OutputHash != f.OutputHash {
 			return ReplayReport{}, fmt.Errorf("replay mismatch seq=%d db=%+v file=%+v", d.Seq, d, f)
 		}
-		if traceRows[i].Seq != d.Seq || traceRows[i].Tool != d.Tool || traceRows[i].InputHash != d.InputHash {
+		if traceRows[i].Seq != d.Seq || traceRows[i].Tool != d.Tool || traceRows[i].InputHash != d.InputHash || traceRows[i].OutputHash != d.OutputHash {
 			return ReplayReport{}, fmt.Errorf("replay mismatch trace seq=%d trace=%+v db=%+v", d.Seq, traceRows[i], d)
 		}
 	}
@@ -243,11 +243,11 @@ func CompareReplayHashes(dbPath, runsDir, runID, againstRunID string) (ReplayRep
 			return out, nil
 		}
 	}
-	baseArt, err := loadArtifactHashes(baseDir)
+	baseArt, err := loadArtifactHashesFromInventory(dbPath, runsDir, runID)
 	if err != nil {
 		return ReplayReport{}, err
 	}
-	otherArt, err := loadArtifactHashes(otherDir)
+	otherArt, err := loadArtifactHashesFromInventory(dbPath, runsDir, againstRunID)
 	if err != nil {
 		return ReplayReport{}, err
 	}
@@ -283,9 +283,10 @@ func loadTraceToolHashes(tracePath string) ([]ToolHashRow, error) {
 			continue
 		}
 		rows = append(rows, ToolHashRow{
-			Seq:       toolSeqFromTrace(e),
-			Tool:      e.Tool,
-			InputHash: e.ArgsHash,
+			Seq:        toolSeqFromTrace(e),
+			Tool:       e.Tool,
+			InputHash:  e.ArgsHash,
+			OutputHash: firstNonEmpty(strings.TrimSpace(e.OutputHash), payloadString(e.Payload, "output_hash")),
 		})
 	}
 	if err := sc.Err(); err != nil {
@@ -436,4 +437,84 @@ func loadArtifactHashes(runDir string) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+func loadArtifactHashesFromInventory(dbPath, runsDir, runID string) ([]string, error) {
+	st, err := store.Open(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+	rows, err := st.DB().Query(`SELECT path,sha256 FROM artifacts WHERE run_id=? ORDER BY path,id`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("query artifacts: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var pathVal string
+		var sha string
+		if err := rows.Scan(&pathVal, &sha); err != nil {
+			return nil, fmt.Errorf("scan artifacts: %w", err)
+		}
+		absPath, relPath := resolveArtifactPath(runsDir, runID, pathVal)
+		if strings.HasPrefix(strings.TrimSpace(sha), "meta:") {
+			out = append(out, relPath+":"+strings.TrimSpace(sha))
+			continue
+		}
+		b, err := os.ReadFile(absPath)
+		if err != nil {
+			return nil, fmt.Errorf("read artifact %s: %w", absPath, err)
+		}
+		out = append(out, relPath+":"+trace.SHA256Hex(b))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows artifacts: %w", err)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func resolveArtifactPath(runsDir, runID, pathVal string) (absPath, relPath string) {
+	clean := filepath.Clean(filepath.FromSlash(strings.TrimSpace(pathVal)))
+	runDir := filepath.Join(runsDir, runID)
+	if filepath.IsAbs(clean) {
+		absPath = clean
+	} else {
+		candidates := []string{
+			filepath.Join(runDir, clean),
+			filepath.Join(runsDir, clean),
+		}
+		for _, c := range candidates {
+			if _, err := os.Lstat(c); err == nil {
+				absPath = c
+				break
+			}
+		}
+		if absPath == "" {
+			absPath = filepath.Join(runDir, clean)
+		}
+	}
+	if rel, err := filepath.Rel(runDir, absPath); err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return absPath, filepath.ToSlash(rel)
+	}
+	return absPath, filepath.ToSlash(clean)
+}
+
+func payloadString(payload map[string]any, key string) string {
+	if payload == nil {
+		return ""
+	}
+	v, _ := payload[key]
+	s, _ := v.(string)
+	return strings.TrimSpace(s)
+}
+
+func firstNonEmpty(ss ...string) string {
+	for _, s := range ss {
+		if strings.TrimSpace(s) != "" {
+			return strings.TrimSpace(s)
+		}
+	}
+	return ""
 }

@@ -139,16 +139,26 @@ func cmdSkillRefine(args []string) error {
 	rationalePath := filepath.Join(runDir, "refine-rationale.json")
 	rationaleRows := make([]map[string]any, 0, len(suggestions))
 	for _, s := range suggestions {
-		rationaleRows = append(rationaleRows, map[string]any{"path": filepath.ToSlash(s.Path), "rationale": s.Rationale})
+		rel, err := filepath.Rel(*repoDir, s.Path)
+		if err != nil {
+			rel = s.Path
+		}
+		rationaleRows = append(rationaleRows, map[string]any{"path": filepath.ToSlash(rel), "rationale": s.Rationale})
 	}
 	rb, _ := json.MarshalIndent(rationaleRows, "", "  ")
 	if err := os.WriteFile(rationalePath, append(rb, '\n'), 0o644); err != nil {
 		return fmt.Errorf("write rationale artifact: %w", err)
 	}
-	prBody := renderRefinePRBody(runID, score, evalRow, patchPath, rationalePath)
+	patchRef := filepath.ToSlash(filepath.Join("runs", runID, "refine.patch"))
+	rationaleRef := filepath.ToSlash(filepath.Join("runs", runID, "refine-rationale.json"))
+	prBody := renderRefinePRBody(runID, score, evalRow, patchRef, rationaleRef)
 	prBodyPath := filepath.Join(runDir, "refine-pr.md")
 	if err := os.WriteFile(prBodyPath, []byte(prBody), 0o644); err != nil {
 		return fmt.Errorf("write pr body artifact: %w", err)
+	}
+	prBodyRef := filepath.ToSlash(filepath.Join("runs", runID, "refine-pr.md"))
+	if err := persistRunArtifacts(ctx, st, runID, []string{patchPath, rationalePath, prBodyPath}); err != nil {
+		return fmt.Errorf("register refine artifacts: %w", err)
 	}
 
 	pathsToAdd := make([]string, 0, len(suggestions))
@@ -172,7 +182,7 @@ func cmdSkillRefine(args []string) error {
 		return err
 	}
 
-	prHint := fmt.Sprintf("%s pr create --title %q --body-file %q --head %q", *ghBin, msg, filepath.ToSlash(prBodyPath), branch)
+	prHint := fmt.Sprintf("%s pr create --title %q --body-file %q --head %q", *ghBin, msg, prBodyRef, branch)
 	if *openPR {
 		if has, _ := hasCommand(ctx, ex, *repoDir, *ghBin); has {
 			if _, err := ex.Run(ctx, skillpkg.Command{Dir: *repoDir, Name: *ghBin, Args: []string{"pr", "create", "--title", msg, "--body-file", prBodyPath, "--head", branch}}); err != nil {
@@ -209,9 +219,9 @@ func cmdSkillRefine(args []string) error {
 		"patch_hash":  skillgit.PatchHash(patch),
 		"hunks":       hunkCount,
 		"artifacts": map[string]any{
-			"patch":     filepath.ToSlash(patchPath),
-			"pr_body":   filepath.ToSlash(prBodyPath),
-			"rationale": filepath.ToSlash(rationalePath),
+			"patch":     patchRef,
+			"pr_body":   prBodyRef,
+			"rationale": rationaleRef,
 		},
 		"next": map[string]any{
 			"pr_create": prHint,

@@ -86,6 +86,30 @@ func TestLoadToolsRejectsUnknownBudgetKey(t *testing.T) {
 	}
 }
 
+func TestLoadToolsRejectsFractionalBudgetValue(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "tools.yaml")
+	if err := os.WriteFile(path, []byte("allowed_tools: [shell.exec]\nbudget: {tool_calls: 1, seconds: 0.5, tokens: 0}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadTools(path)
+	if err == nil || !strings.Contains(err.Error(), "must be integer") {
+		t.Fatalf("expected integer budget rejection, got %v", err)
+	}
+}
+
+func TestLoadToolsRejectsStringBudgetValue(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "tools.yaml")
+	if err := os.WriteFile(path, []byte("allowed_tools: [shell.exec]\nbudget: {tool_calls: \"1\", seconds: 10, tokens: 0}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadTools(path)
+	if err == nil || !strings.Contains(err.Error(), "must be integer") {
+		t.Fatalf("expected integer budget rejection, got %v", err)
+	}
+}
+
 func writeSkillFiles(t *testing.T, dir, skillMD, toolsYAML string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(dir, "tests"), 0o755); err != nil {

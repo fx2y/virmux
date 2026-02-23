@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -70,6 +71,10 @@ func cmdSkillSuggest(args []string) error {
 
 	ex := skilleval.OSExec{}
 	ctx := context.Background()
+	baseHead, err := gitHeadSHA(ctx, ex, *repoDir)
+	if err != nil {
+		return err
+	}
 	results := make([]map[string]any, 0, len(triggered))
 	for _, cand := range triggered {
 		exemplarRun := cand.RunIDs[0]
@@ -80,6 +85,9 @@ func cmdSkillSuggest(args []string) error {
 		}
 		if err := ensureGitCleanForSuggest(ctx, ex, *repoDir, files.SkillDir); err != nil {
 			return err
+		}
+		if _, err := ex.Run(ctx, skillpkg.Command{Dir: *repoDir, Name: "git", Args: []string{"checkout", "--detach", baseHead}}); err != nil {
+			return fmt.Errorf("anchor suggest branch base %s: %w", baseHead, err)
 		}
 		branch := "suggest/" + strings.TrimPrefix(files.SkillName, "suggest-")
 		if _, err := ex.Run(ctx, skillpkg.Command{Dir: *repoDir, Name: "git", Args: []string{"checkout", "-b", branch}}); err != nil {
@@ -114,25 +122,34 @@ func cmdSkillSuggest(args []string) error {
 			return fmt.Errorf("git add suggest files: %w", err)
 		}
 		msg := fmt.Sprintf("suggest: %s from motif %s", files.SkillName, cand.MotifKey[:12])
-		prBodyPath, err := writeSuggestPRBody(*runsDir, files.SkillName, cand)
+		prBody, err := writeSuggestPRBody(*runsDir, files.SkillName, cand)
 		if err != nil {
 			return err
 		}
-		prBodyRaw, err := os.ReadFile(prBodyPath)
-		if err != nil {
-			return err
-		}
-		if _, err := ex.Run(ctx, skillpkg.Command{Dir: *repoDir, Name: "git", Args: []string{"commit", "-m", msg, "-m", strings.TrimSpace(string(prBodyRaw))}}); err != nil {
+		if _, err := ex.Run(ctx, skillpkg.Command{Dir: *repoDir, Name: "git", Args: []string{"commit", "-m", msg, "-m", strings.TrimSpace(prBody.Body)}}); err != nil {
 			return fmt.Errorf("git commit suggest files: %w", err)
 		}
 		headSHA, err := gitHeadSHA(ctx, ex, *repoDir)
 		if err != nil {
 			return err
 		}
-		prHint := fmt.Sprintf("%s pr create --title %q --body-file %q --head %q", *ghBin, msg, filepath.ToSlash(prBodyPath), branch)
+		if err := st.InsertSuggestRun(ctx, store.SuggestRun{
+			ID:         prBody.ID,
+			Skill:      files.SkillName,
+			MotifKey:   cand.MotifKey,
+			Branch:     branch,
+			CommitSHA:  headSHA,
+			PRBodyHash: prBody.BodyHash,
+			PRBodyPath: prBody.PathRef,
+			RunIDsJSON: mustJSONCompact(cand.RunIDs),
+			CreatedAt:  time.Now().UTC(),
+		}); err != nil {
+			return err
+		}
+		prHint := fmt.Sprintf("%s pr create --title %q --body-file %q --head %q", *ghBin, msg, prBody.PathRef, branch)
 		if *openPR {
 			if has, _ := hasCommand(ctx, ex, *repoDir, *ghBin); has {
-				if _, err := ex.Run(ctx, skillpkg.Command{Dir: *repoDir, Name: *ghBin, Args: []string{"pr", "create", "--title", msg, "--body-file", prBodyPath, "--head", branch}}); err != nil {
+				if _, err := ex.Run(ctx, skillpkg.Command{Dir: *repoDir, Name: *ghBin, Args: []string{"pr", "create", "--title", msg, "--body-file", prBody.PathAbs, "--head", branch}}); err != nil {
 					return fmt.Errorf("open pr: %w", err)
 				}
 			}
@@ -143,7 +160,7 @@ func cmdSkillSuggest(args []string) error {
 			"commit":         headSHA,
 			"motif_key":      cand.MotifKey,
 			"run_ids":        cand.RunIDs,
-			"pr_body_path":   filepath.ToSlash(prBodyPath),
+			"pr_body_path":   prBody.PathRef,
 			"expected_value": cand.ExpectedReuseValue,
 			"next": map[string]any{
 				"pr_create": prHint,
@@ -161,11 +178,18 @@ func cmdSkillSuggest(args []string) error {
 
 func loadMotifFeatures(db *sql.DB, runsDir, skillsDir string) ([]skillmotif.RunFeature, error) {
 	rows, err := db.Query(`
-SELECT s.run_id,s.skill,s.score,s.pass,r.cost_est
-FROM scores s
-JOIN runs r ON r.id=s.run_id
-WHERE r.task='skill:run'
-ORDER BY s.created_at,s.run_id`)
+WITH ranked AS (
+  SELECT s.id,s.run_id,s.skill,s.score,s.pass,s.created_at,
+         ROW_NUMBER() OVER (PARTITION BY s.run_id ORDER BY datetime(s.created_at) DESC, s.id DESC) AS rn
+  FROM scores s
+  JOIN runs r ON r.id=s.run_id
+  WHERE r.task='skill:run'
+)
+SELECT ranked.run_id,ranked.skill,ranked.score,ranked.pass,r.cost_est
+FROM ranked
+JOIN runs r ON r.id=ranked.run_id
+WHERE ranked.rn=1
+ORDER BY ranked.created_at,ranked.run_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -190,14 +214,25 @@ ORDER BY s.created_at,s.run_id`)
 		if err != nil {
 			return nil, err
 		}
+		meta, _ := readSkillRunMeta(filepath.Join(runsDir, runID))
+		promptFP := strings.TrimSpace(meta.PromptFingerprint)
+		baseFP := strings.TrimSpace(meta.SkillBaseFingerprint)
+		if baseFP == "" {
+			baseFP = strings.TrimSpace(meta.SkillSHA)
+		}
+		if promptFP == "" && baseFP != "" {
+			promptFP = baseFP
+		}
 		f, err := skillmotif.BuildFeature(skillmotif.BuildInput{
-			RunID:     runID,
-			Skill:     skill,
-			Score:     score,
-			Pass:      pass != 0,
-			CostEst:   cost,
-			ToolCalls: tcs,
-			Artifacts: arts,
+			RunID:                runID,
+			Skill:                skill,
+			Score:                score,
+			Pass:                 pass != 0,
+			CostEst:              cost,
+			ToolCalls:            tcs,
+			Artifacts:            arts,
+			PromptFingerprint:    promptFP,
+			SkillBaseFingerprint: baseFP,
 		}, skillsDir)
 		if err != nil {
 			return nil, err
@@ -209,13 +244,15 @@ ORDER BY s.created_at,s.run_id`)
 				extra = append(extra, skillmotif.ArtifactRow{Path: "expect:" + filepath.ToSlash(p), SHA256: "meta:expect"})
 			}
 			ff, err := skillmotif.BuildFeature(skillmotif.BuildInput{
-				RunID:     runID,
-				Skill:     skill,
-				Score:     score,
-				Pass:      pass != 0,
-				CostEst:   cost,
-				ToolCalls: tcs,
-				Artifacts: append(arts, extra...),
+				RunID:                runID,
+				Skill:                skill,
+				Score:                score,
+				Pass:                 pass != 0,
+				CostEst:              cost,
+				ToolCalls:            tcs,
+				Artifacts:            append(arts, extra...),
+				PromptFingerprint:    promptFP,
+				SkillBaseFingerprint: baseFP,
 			}, skillsDir)
 			if err == nil {
 				f = ff
@@ -316,11 +353,19 @@ func exemplarToolArgs(runsDir, runID string) (string, map[string]any) {
 	return tool, args
 }
 
-func writeSuggestPRBody(runsDir, skill string, c skillmotif.Candidate) (string, error) {
+type suggestPRBody struct {
+	ID       string
+	PathAbs  string
+	PathRef  string
+	Body     string
+	BodyHash string
+}
+
+func writeSuggestPRBody(runsDir, skill string, c skillmotif.Candidate) (suggestPRBody, error) {
 	id := fmt.Sprintf("%d-suggest", time.Now().UTC().UnixNano())
 	dir := filepath.Join(runsDir, id)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
+		return suggestPRBody{}, err
 	}
 	body := strings.Join([]string{
 		fmt.Sprintf("Suggested skill: %s", skill),
@@ -333,9 +378,16 @@ func writeSuggestPRBody(runsDir, skill string, c skillmotif.Candidate) (string, 
 	}, "\n") + "\n"
 	path := filepath.Join(dir, "suggest-pr.md")
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		return "", err
+		return suggestPRBody{}, err
 	}
-	return path, nil
+	sum := sha256.Sum256([]byte(body))
+	return suggestPRBody{
+		ID:       id,
+		PathAbs:  path,
+		PathRef:  filepath.ToSlash(filepath.Join("runs", id, "suggest-pr.md")),
+		Body:     body,
+		BodyHash: fmt.Sprintf("sha256:%x", sum[:]),
+	}, nil
 }
 
 func ensureGitCleanForSuggest(ctx context.Context, ex skilleval.OSExec, repoDir, skillDir string) error {
@@ -364,4 +416,12 @@ func asString(v any) string {
 	default:
 		return fmt.Sprint(v)
 	}
+}
+
+func mustJSONCompact(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
 }

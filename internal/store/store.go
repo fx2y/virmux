@@ -138,6 +138,18 @@ type RefineRun struct {
 	CreatedAt  time.Time
 }
 
+type SuggestRun struct {
+	ID         string
+	Skill      string
+	MotifKey   string
+	Branch     string
+	CommitSHA  string
+	PRBodyHash string
+	PRBodyPath string
+	RunIDsJSON string
+	CreatedAt  time.Time
+}
+
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create db dir: %w", err)
@@ -319,6 +331,17 @@ CREATE TABLE IF NOT EXISTS refine_runs (
   created_at TEXT NOT NULL,
   FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS suggest_runs (
+  id TEXT PRIMARY KEY,
+  skill TEXT NOT NULL,
+  motif_key TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  pr_body_hash TEXT NOT NULL,
+  pr_body_path TEXT NOT NULL DEFAULT '',
+  run_ids_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id);
 CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at);
 CREATE INDEX IF NOT EXISTS idx_artifacts_run_id ON artifacts(run_id);
@@ -333,6 +356,7 @@ CREATE INDEX IF NOT EXISTS idx_eval_cases_run_fixture ON eval_cases(eval_run_id,
 CREATE INDEX IF NOT EXISTS idx_promotions_skill_created ON promotions(skill,created_at);
 CREATE INDEX IF NOT EXISTS idx_refine_runs_run_created ON refine_runs(run_id,created_at);
 CREATE INDEX IF NOT EXISTS idx_refine_runs_skill_created ON refine_runs(skill,created_at);
+CREATE INDEX IF NOT EXISTS idx_suggest_runs_skill_created ON suggest_runs(skill,created_at);
 `
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("ensure schema: %w", err)
@@ -694,6 +718,29 @@ func (s *Store) InsertRefineRun(ctx context.Context, row RefineRun) error {
 	)
 	if err != nil {
 		return fmt.Errorf("insert refine_run: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) InsertSuggestRun(ctx context.Context, row SuggestRun) error {
+	if row.CreatedAt.IsZero() {
+		row.CreatedAt = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO suggest_runs(id,skill,motif_key,branch,commit_sha,pr_body_hash,pr_body_path,run_ids_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		row.ID,
+		row.Skill,
+		row.MotifKey,
+		row.Branch,
+		row.CommitSHA,
+		row.PRBodyHash,
+		row.PRBodyPath,
+		row.RunIDsJSON,
+		row.CreatedAt.UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return fmt.Errorf("insert suggest_run: %w", err)
 	}
 	return nil
 }

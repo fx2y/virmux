@@ -40,13 +40,15 @@ type ArtifactRow struct {
 }
 
 type BuildInput struct {
-	RunID     string
-	Skill     string
-	Score     float64
-	Pass      bool
-	CostEst   float64
-	ToolCalls []ToolCallRow
-	Artifacts []ArtifactRow
+	RunID                string
+	Skill                string
+	Score                float64
+	Pass                 bool
+	CostEst              float64
+	ToolCalls            []ToolCallRow
+	Artifacts            []ArtifactRow
+	PromptFingerprint    string
+	SkillBaseFingerprint string
 }
 
 type Thresholds struct {
@@ -100,7 +102,11 @@ func BuildFeature(in BuildInput, skillsDir string) (RunFeature, error) {
 	}
 	toolSeqHash, toolNames := calcToolSeqHash(in.ToolCalls)
 	artifactHash := calcArtifactSchemaHash(in.Artifacts)
-	promptFP, baseFP := loadSkillFingerprints(skillsDir, in.Skill)
+	promptFP := strings.TrimSpace(in.PromptFingerprint)
+	baseFP := strings.TrimSpace(in.SkillBaseFingerprint)
+	if promptFP == "" || baseFP == "" {
+		promptFP, baseFP = loadSkillFingerprints(skillsDir, in.Skill)
+	}
 	key := calcMotifKey(toolSeqHash, artifactHash, promptFP, baseFP)
 	return RunFeature{
 		RunID:                in.RunID,
