@@ -1,0 +1,1 @@
+{"id":"case01","tool":"shell.exec","args":{"cmd":"printf 'ok\\n' \u003e /dev/virmux-data/dd.out \u0026\u0026 echo ok","cwd":"/dev/virmux-data","timeout_ms":20000},"deterministic":true}

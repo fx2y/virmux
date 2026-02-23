@@ -1,0 +1,5 @@
+allowed_tools: [shell.exec]
+budget:
+  tool_calls: 1
+  seconds: 20
+  tokens: 0

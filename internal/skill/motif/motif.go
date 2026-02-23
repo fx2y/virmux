@@ -323,14 +323,16 @@ func calcToolSeqHash(rows []ToolCallRow) (string, []string) {
 
 func calcArtifactSchemaHash(rows []ArtifactRow) string {
 	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].Path == rows[j].Path {
+		pi := normalizeArtifactSchemaPath(rows[i].Path)
+		pj := normalizeArtifactSchemaPath(rows[j].Path)
+		if pi == pj {
 			return rows[i].SHA256 < rows[j].SHA256
 		}
-		return rows[i].Path < rows[j].Path
+		return pi < pj
 	})
 	lines := make([]string, 0, len(rows))
 	for _, r := range rows {
-		p := filepath.ToSlash(strings.TrimSpace(r.Path))
+		p := normalizeArtifactSchemaPath(r.Path)
 		sha := strings.TrimSpace(r.SHA256)
 		typ := "file"
 		if strings.HasPrefix(sha, "meta:") {
@@ -341,6 +343,21 @@ func calcArtifactSchemaHash(rows []ArtifactRow) string {
 		}
 	}
 	return hashLines(lines)
+}
+
+func normalizeArtifactSchemaPath(path string) string {
+	p := filepath.ToSlash(filepath.Clean(strings.TrimSpace(path)))
+	if p == "." {
+		return ""
+	}
+	if idx := strings.Index(p, "/runs/"); idx >= 0 {
+		p = p[idx+1:]
+	}
+	parts := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	if len(parts) >= 3 && parts[0] == "runs" && parts[1] != "" {
+		return strings.Join(parts[2:], "/")
+	}
+	return strings.TrimPrefix(p, "/")
 }
 
 func loadSkillFingerprints(skillsDir, skill string) (promptFingerprint, baseFingerprint string) {

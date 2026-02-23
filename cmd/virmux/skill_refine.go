@@ -243,7 +243,7 @@ func resolveRefineEval(ctx context.Context, st *store.Store, skillName, evalRunI
 		}
 		return row, nil
 	}
-	return st.LatestEvalRunBySkill(ctx, skillName)
+	return st.LatestPassingEvalRunBySkill(ctx, skillName)
 }
 
 func ensureGitCleanForRefine(ctx context.Context, ex skilleval.OSExec, repoDir string, suggestions []skillrefine.Suggestion) error {

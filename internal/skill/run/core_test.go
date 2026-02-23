@@ -31,6 +31,28 @@ func TestLoadFixtureShellExecCmdShortcut(t *testing.T) {
 	}
 }
 
+func TestResolveFixturePathPrefersExistingRepoRelative(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	skillDir := filepath.Join(root, "skills", "dd")
+	if err := os.MkdirAll(filepath.Join(skillDir, "tests"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	repoRel := filepath.Join(root, "skills", "dd", "tests", "case01.json")
+	if err := os.WriteFile(repoRel, []byte(`{"id":"case01","cmd":"echo ok"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cwd, _ := os.Getwd()
+	defer os.Chdir(cwd)
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	got := ResolveFixturePath(filepath.Join("skills", "dd"), filepath.ToSlash(filepath.Join("skills", "dd", "tests", "case01.json")))
+	if filepath.Clean(got) != filepath.Clean(filepath.Join("skills", "dd", "tests", "case01.json")) {
+		t.Fatalf("expected repo-relative fixture path, got %q", got)
+	}
+}
+
 func TestBudgetTrackerToolCallsExceededTyped(t *testing.T) {
 	t.Parallel()
 	bt := NewBudgetTracker(Budget{ToolCalls: 0}, time.Unix(0, 0))

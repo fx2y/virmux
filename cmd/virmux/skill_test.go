@@ -757,6 +757,41 @@ func TestCmdSkillRunRejectsPathEscapeName(t *testing.T) {
 	}
 }
 
+func TestCmdSkillRunAcceptsRepoRelativeFixturePath(t *testing.T) {
+	tmp := t.TempDir()
+	skillDir := filepath.Join(tmp, "skills", "dd")
+	if err := os.MkdirAll(filepath.Join(skillDir, "tests"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: dd\ndescription: x\nrequires: {bins: [], env: [], config: []}\nos: [linux]\n---\n# Steps\nDo one thing.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "tools.yaml"), []byte("allowed_tools: [shell.exec]\nbudget: {tool_calls: 0, seconds: 1, tokens: 0}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "rubric.yaml"), []byte("criteria:\n- {id: format, w: 0.4, must: true}\n- {id: completeness, w: 0.4}\n- {id: actionability, w: 0.2}\npass: 0.8\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "tests", "case01.json"), []byte(`{"id":"case01","tool":"shell.exec","args":{"cmd":"echo ok"},"deterministic":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cwd, _ := os.Getwd()
+	defer os.Chdir(cwd)
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	err := cmdSkillRun([]string{
+		"dd",
+		"--fixture", "skills/dd/tests/case01.json",
+		"--skills-dir", "skills",
+		"--runs-dir", "runs",
+		"--db", filepath.Join("runs", "virmux.sqlite"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "BUDGET_EXCEEDED") {
+		t.Fatalf("expected budget-exceeded preflight after fixture load, got %v", err)
+	}
+}
+
 func TestCmdSkillRunBudgetPreflightNoVMDependency(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
@@ -798,6 +833,58 @@ func TestCmdSkillRunBudgetPreflightNoVMDependency(t *testing.T) {
 	}
 	if len(matches) != 1 {
 		t.Fatalf("expected one preflight run score artifact, got %v", matches)
+	}
+}
+
+func TestResolveRefineEvalPrefersLatestPassing(t *testing.T) {
+	t.Parallel()
+	dbPath := filepath.Join(t.TempDir(), "runs", "virmux.sqlite")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	if err := st.InsertEvalRun(ctx, store.EvalRun{
+		ID:            "ab-pass",
+		Skill:         "dd",
+		Cohort:        "qa-c4",
+		BaseRef:       "base",
+		HeadRef:       "head",
+		Provider:      "fake",
+		FixturesHash:  "sha256:fx",
+		CfgSHA256:     "sha256:cfg",
+		ResultsSHA256: "sha256:res",
+		VerdictSHA256: "sha256:verdict",
+		VerdictJSON:   `{"pass":true}`,
+		Pass:          true,
+		CreatedAt:     time.Now().UTC().Add(-1 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertEvalRun(ctx, store.EvalRun{
+		ID:            "ab-fail",
+		Skill:         "dd",
+		Cohort:        "qa-c4",
+		BaseRef:       "base",
+		HeadRef:       "head",
+		Provider:      "fake",
+		FixturesHash:  "sha256:fx2",
+		CfgSHA256:     "sha256:cfg2",
+		ResultsSHA256: "sha256:res2",
+		VerdictSHA256: "sha256:verdict2",
+		VerdictJSON:   `{"pass":false}`,
+		Pass:          false,
+		CreatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	row, err := resolveRefineEval(ctx, st, "dd", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.ID != "ab-pass" || !row.Pass {
+		t.Fatalf("expected latest passing eval, got %+v", row)
 	}
 }
 

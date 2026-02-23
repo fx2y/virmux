@@ -135,13 +135,7 @@ func cmdSkillRun(args []string) error {
 		return fmt.Errorf("skill %s dormant (excluded): %s", skillDef.Meta.Name, strings.Join(skillDef.Reasons, ","))
 	}
 	fxPath := *fixturePath
-	if !filepath.IsAbs(fxPath) {
-		if strings.HasPrefix(fxPath, "tests/") {
-			fxPath = filepath.Join(dir, fxPath)
-		} else {
-			fxPath = filepath.Join(dir, "tests", fxPath)
-		}
-	}
+	fxPath = skillrun.ResolveFixturePath(dir, fxPath)
 	fx, err := skillrun.LoadFixture(fxPath)
 	if err != nil {
 		return err

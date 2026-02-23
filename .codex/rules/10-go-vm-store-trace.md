@@ -4,44 +4,42 @@ paths:
   - "internal/**/*.go"
 ---
 # Go Runtime Rules
-- CLI stays thin: flags+DI in `cmd/*`; behavior in `internal/*`.
-- Behavior changes require `*_test.go` coverage for success+failure paths.
-- Errors wrap operation context (`op: %w`) and preserve typed root cause.
-- All I/O/long paths take `context.Context`; no unbounded wait, no goroutine leak.
-
-- VM lifecycle is host-driven/deterministic; never trust guest self-poweroff as sole completion.
-- Serial exec contract uses parsed marker lines (`__virmux_exec_start__`,`__virmux_exec_rc__`); marker checks only inside parsed command-output segment.
-- Smoke bridge still requires `Linux` + `ok` markers until explicitly retired.
-- Mandatory boundary events on VM lanes: `vm.boot.started`,`vm.exec.injected`,`vm.exit.observed`.
-
-- Vsock contract:
-- Dial via shared transport (`internal/transport/vsock`), not command-local dialers.
-- Handshake accept condition is `OK ` prefix; non-OK ack is non-retryable `ErrConnectAck`.
-- Retry budget applies only to early stream faults; terminal retry exhaustion must surface typed error.
-- READY parser is strict (`READY v0 tools=`) and capability list is parsed, not free-text trusted.
-
-- `run.finished` payload contract (non-null/stable where applicable): `lost_logs`,`lost_metrics`,`guest_ready_ms`,`connect_attempts`,`handshake_ms`,`error_obj{code,msg,retryable}`.
-- Error classification must map to stable host-visible classes (`TIMEOUT`,`DENIED`,`DISCONNECT`,`CRASH`,`INTERNAL`) instead of ad-hoc strings.
-
-- Resume contract:
-- Resolve precedence: explicit mem/state > `agent.last_snapshot_id` > `latest.json`.
-- Snapshot restore must use SDK snapshot handler path (`WithSnapshot(...)`), not config-only stubs.
-- Attempt snapshot once; any resolve/load/wait fault => `StopVMM+Wait` then cold fallback.
-- `vm:resume` terminal event must include non-null `resume_mode`,`resume_source`,`resume_error`.
-- Resume wait handling must remain seam-injected/testable (start/stop/wait/sleep/process probes), not hardwired runtime calls.
-
-- Agent/state contract:
-- SoT is `agents/<id>.json` via `internal/agent`.
-- Persistent RW disk is `volumes/<agent>.ext4`; rootfs remains RO (`rootflags=noload`).
-
-- Store/trace contract:
-- `runs` identity fields evolve additively.
-- `artifacts` is mandatory evidence inventory for run outputs.
-- Artifact typing uses `lstat`; regular files hash content, non-regular types persist `meta:*` rows with `bytes=0`.
-- SQLite invariants are hard (`WAL`,`FK`,`required indexes`); keep `db:check` green.
-- Trace is append-only (`O_APPEND|O_CREATE|O_WRONLY`); no truncate-on-reopen.
-- Per-event ordering is fixed: `trace emit -> sqlite insert`.
-
-- Export/import contract:
-- Export bundles are deterministic (sorted names, epoch mtime, uid/gid=0).
-- Import verifies manifest before insert and denies path/symlink escapes.
+- `cmd/*` is flags/DI/wiring only; behavior lives in `internal/*`.
+- Behavior edits require success+failure tests in `*_test.go`.
+- Errors wrap op context and preserve typed root cause.
+- Long paths accept `context.Context`; no unbounded waits, no goroutine leaks.
+- VM lifecycle is host-owned; guest self-exit is never sole completion truth.
+- VM boundary events are mandatory: `vm.boot.started`,`vm.exec.injected`,`vm.exit.observed`.
+- Serial exec parsing is marker-segment bounded (`__virmux_exec_start__`,`__virmux_exec_rc__`); no raw tty substring trust.
+- Smoke markers `Linux`+`ok` are required for smoke bridge only; vsock-first lanes must not depend on tty markers.
+- Vsock dial uses shared transport only (`internal/transport/vsock`); command-local dialers banned.
+- CONNECT ack accept is `OK ` prefix; non-OK ack is non-retryable `ErrConnectAck`.
+- Retry budget applies only to early stream faults; exhaustion returns typed retry error.
+- READY parser is strict (`READY v0 tools=`); capability list must be parsed, never free-text trusted.
+- `run.finished` non-null contract keys: `lost_logs`,`lost_metrics`,`guest_ready_ms`,`connect_attempts`,`handshake_ms`,`error_obj{code,msg,retryable}`.
+- Host error classes are stable: `TIMEOUT`,`DENIED`,`DISCONNECT`,`CRASH`,`INTERNAL`.
+- Resume precedence: explicit mem/state > `agent.last_snapshot_id` > `latest.json`.
+- Snapshot restore uses SDK snapshot path (`WithSnapshot(...)`) and attempts once.
+- Any resume resolve/load/wait fault enforces `StopVMM+Wait` then cold fallback.
+- Every `vm:resume` terminal event includes non-null `resume_mode`,`resume_source`,`resume_error`.
+- Resume wait logic stays seam-injected/testable (`start/stop/wait/sleep/process probes`).
+- SoT state is `agents/<id>.json`; mutable disk is `volumes/<agent>.ext4`; rootfs stays RO (`rootflags=noload`).
+- `runs`/`events`/`tool_calls`/`artifacts` schemas evolve additively only.
+- Artifact inventory is sqlite-first: regular file => content hash; non-regular => `meta:*` row via `lstat`, `bytes=0`.
+- Trace is append-only (`O_APPEND|O_CREATE|O_WRONLY`) and per-event order is fixed `trace emit -> sqlite insert`.
+- SQLite invariants are hard (`WAL`,`FK`,`required indexes`); checks are validator-only.
+- Export/import is deterministic+safe: canonical ordering/mtime/uid/gid, manifest verified pre-insert, path+symlink escape denied.
+- Skill canon: `SKILL.md` SoT; `prompt.md` compat shim only.
+- Skill CLI canon: `virmux skill <lint|run|judge|ab|refine|suggest|promote|replay>`.
+- Skill arg safety: name is strict kebab token; escapes hard-fail typed `SKILL_PATH_ESCAPE`.
+- Skill SHA is path-invariant hash of required rel files `SKILL.md|tools.yaml|rubric.yaml`.
+- Fixture resolve order is deterministic `raw -> skill/raw -> skill/tests/raw`.
+- Tool policy parser is strict integer-only for budget keys (`tool_calls`,`seconds`,`tokens`).
+- `skill run` policy deny (`TOOL_DENIED`,`BUDGET_EXCEEDED`) fails closed with required evidence persisted.
+- `skill judge` must abort before scoring inserts if `skill.judge.started` emit fails.
+- Replay parity checks ordered tool input+output hashes and sqlite artifact inventory parity.
+- AB freeze rule: both refs evaluate on head fixture payload set; base missing fixture id is hard fail.
+- AB cfg/results hash/path must match exact persisted bundle bytes.
+- Refine default eval selection is latest passing AB row (not latest by time).
+- Refine/suggest persisted refs must be run-relative/repo-relative; absolute host paths forbidden.
+- Suggest mining must use run-evidence fingerprints, latest score per run, normalized run-scoped refs, and base-head branch re-anchoring per candidate.

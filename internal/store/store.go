@@ -788,3 +788,47 @@ func (s *Store) LatestEvalRunBySkill(ctx context.Context, skill string) (EvalRun
 	row.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 	return row, nil
 }
+
+func (s *Store) LatestPassingEvalRunBySkill(ctx context.Context, skill string) (EvalRun, error) {
+	var row EvalRun
+	var passInt int
+	var created string
+	err := s.db.QueryRowContext(
+		ctx,
+		`SELECT id,skill,cohort,base_ref,head_ref,provider,fixtures_hash,cfg_sha256,cfg_path,results_sha256,results_path,verdict_sha256,verdict_path,score_p50_base,score_p50_head,fail_rate_base,fail_rate_head,cost_total_base,cost_total_head,score_p50_delta,fail_rate_delta,cost_delta,pass,verdict_json,created_at
+		 FROM eval_runs WHERE skill=? AND pass=1 ORDER BY datetime(created_at) DESC, id DESC LIMIT 1`,
+		skill,
+	).Scan(
+		&row.ID,
+		&row.Skill,
+		&row.Cohort,
+		&row.BaseRef,
+		&row.HeadRef,
+		&row.Provider,
+		&row.FixturesHash,
+		&row.CfgSHA256,
+		&row.CfgPath,
+		&row.ResultsSHA256,
+		&row.ResultsPath,
+		&row.VerdictSHA256,
+		&row.VerdictPath,
+		&row.ScoreP50Base,
+		&row.ScoreP50Head,
+		&row.FailRateBase,
+		&row.FailRateHead,
+		&row.CostTotalBase,
+		&row.CostTotalHead,
+		&row.ScoreP50Delta,
+		&row.FailRateDelta,
+		&row.CostDelta,
+		&passInt,
+		&row.VerdictJSON,
+		&created,
+	)
+	if err != nil {
+		return EvalRun{}, fmt.Errorf("query latest passing eval_run skill=%s: %w", skill, err)
+	}
+	row.Pass = passInt != 0
+	row.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	return row, nil
+}

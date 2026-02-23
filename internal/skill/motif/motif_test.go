@@ -130,6 +130,45 @@ func TestBuildFeatureUsesProvidedFingerprintsOverWorkspaceHead(t *testing.T) {
 	}
 }
 
+func TestBuildFeatureNormalizesRunScopedArtifactPaths(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeSkill(t, root, "dd")
+	base := BuildInput{
+		Skill:                "dd",
+		Score:                0.9,
+		Pass:                 true,
+		CostEst:              0.1,
+		ToolCalls:            []ToolCallRow{{Seq: 1, Tool: "shell.exec", InputHash: "sha256:in"}},
+		PromptFingerprint:    "sha256:prompt-from-run",
+		SkillBaseFingerprint: "sha256:base-from-run",
+	}
+	a, err := BuildFeature(BuildInput{
+		RunID:     "r1",
+		Artifacts: []ArtifactRow{{Path: "runs/r1/artifacts/out.txt", SHA256: "sha256:x"}},
+		Skill:     base.Skill, Score: base.Score, Pass: base.Pass, CostEst: base.CostEst,
+		ToolCalls: base.ToolCalls, PromptFingerprint: base.PromptFingerprint, SkillBaseFingerprint: base.SkillBaseFingerprint,
+	}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := BuildFeature(BuildInput{
+		RunID:     "r2",
+		Artifacts: []ArtifactRow{{Path: "runs/r2/artifacts/out.txt", SHA256: "sha256:x"}},
+		Skill:     base.Skill, Score: base.Score, Pass: base.Pass, CostEst: base.CostEst,
+		ToolCalls: base.ToolCalls, PromptFingerprint: base.PromptFingerprint, SkillBaseFingerprint: base.SkillBaseFingerprint,
+	}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.ArtifactSchemaHash != b.ArtifactSchemaHash {
+		t.Fatalf("artifact schema hash drifted across run-id prefixes: %s != %s", a.ArtifactSchemaHash, b.ArtifactSchemaHash)
+	}
+	if a.MotifKey != b.MotifKey {
+		t.Fatalf("motif key drifted across run-id prefixes: %s != %s", a.MotifKey, b.MotifKey)
+	}
+}
+
 func writeSkill(t *testing.T, root, name string) {
 	t.Helper()
 	dir := filepath.Join(root, name)

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -80,10 +81,11 @@ func TestDBCheckFailsHashMismatchWithoutMutation(t *testing.T) {
 	}
 	_ = st.Close()
 
-	scriptPath, err := filepath.Abs(filepath.Join("..", "..", "scripts", "db_check.sh"))
-	if err != nil {
-		t.Fatal(err)
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
 	}
+	scriptPath := filepath.Join(filepath.Dir(thisFile), "..", "..", "scripts", "db_check.sh")
 	cmd := exec.Command("bash", scriptPath)
 	cmd.Dir = repo
 	out, err := cmd.CombinedOutput()
