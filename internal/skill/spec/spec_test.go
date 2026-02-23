@@ -94,7 +94,7 @@ func writeSkillFiles(t *testing.T, dir, skillMD, toolsYAML string) {
 	if err := os.WriteFile(filepath.Join(dir, "tests", "case01.json"), []byte("{\"id\":\"case01\"}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "rubric.yaml"), []byte("criteria: []\npass: 0\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "rubric.yaml"), []byte("criteria:\n- {id: format, w: 0.4, must: true}\n- {id: completeness, w: 0.4}\n- {id: actionability, w: 0.2}\npass: 0.8\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(skillMD), 0o644); err != nil {

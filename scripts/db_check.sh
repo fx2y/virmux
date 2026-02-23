@@ -48,6 +48,7 @@ if [[ "$fk_errs" -ne 0 ]]; then
 fi
 
 required_indexes=(idx_events_run_id idx_runs_started_at idx_artifacts_run_id idx_tool_calls_run_seq idx_tool_calls_tool_input_hash)
+required_indexes+=(idx_scores_run_created idx_scores_skill_pass idx_judge_runs_run_created)
 for idx in "${required_indexes[@]}"; do
   c="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='$idx';")"
   if [[ "$c" != "1" ]]; then
@@ -58,6 +59,10 @@ done
 
 tool_calls_table="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tool_calls';")"
 [[ "$tool_calls_table" == "1" ]] || { echo "db:check: missing table: tool_calls" >&2; exit 1; }
+scores_table="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='scores';")"
+[[ "$scores_table" == "1" ]] || { echo "db:check: missing table: scores" >&2; exit 1; }
+judge_runs_table="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='judge_runs';")"
+[[ "$judge_runs_table" == "1" ]] || { echo "db:check: missing table: judge_runs" >&2; exit 1; }
 
 tool_rows="$(sqlite3 "$db" "SELECT COUNT(*) FROM tool_calls;")"
 if [[ "$tool_rows" != "0" ]]; then

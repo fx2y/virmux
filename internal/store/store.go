@@ -47,6 +47,30 @@ type ToolCall struct {
 	ErrorCode  string
 }
 
+type Score struct {
+	RunID        string
+	Skill        string
+	Score        float64
+	Pass         bool
+	Critique     string
+	JudgeCfgHash string
+	ArtifactHash string
+	CreatedAt    time.Time
+}
+
+type JudgeRun struct {
+	RunID        string
+	Skill        string
+	RubricHash   string
+	JudgeCfgHash string
+	ArtifactHash string
+	MetricsJSON  string
+	Critique     string
+	Score        float64
+	Pass         bool
+	CreatedAt    time.Time
+}
+
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create db dir: %w", err)
@@ -135,11 +159,40 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   error_code TEXT NOT NULL DEFAULT '',
   FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS scores (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  skill TEXT NOT NULL,
+  score REAL NOT NULL,
+  pass INTEGER NOT NULL DEFAULT 0,
+  critique TEXT NOT NULL DEFAULT '[]',
+  judge_cfg_hash TEXT NOT NULL,
+  artifact_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS judge_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  skill TEXT NOT NULL,
+  rubric_hash TEXT NOT NULL,
+  judge_cfg_hash TEXT NOT NULL,
+  artifact_hash TEXT NOT NULL,
+  metrics_json TEXT NOT NULL DEFAULT '{}',
+  critique TEXT NOT NULL DEFAULT '[]',
+  score REAL NOT NULL,
+  pass INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+);
 CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id);
 CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at);
 CREATE INDEX IF NOT EXISTS idx_artifacts_run_id ON artifacts(run_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_run_seq ON tool_calls(run_id,seq);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_tool_input_hash ON tool_calls(tool,input_hash);
+CREATE INDEX IF NOT EXISTS idx_scores_run_created ON scores(run_id,created_at);
+CREATE INDEX IF NOT EXISTS idx_scores_skill_pass ON scores(skill,pass);
+CREATE INDEX IF NOT EXISTS idx_judge_runs_run_created ON judge_runs(run_id,created_at);
 `
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("ensure schema: %w", err)
@@ -275,6 +328,60 @@ func (s *Store) InsertSlackEvent(ctx context.Context, eventType, payload string,
 	)
 	if err != nil {
 		return fmt.Errorf("insert slack event: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) InsertScore(ctx context.Context, row Score) error {
+	if row.CreatedAt.IsZero() {
+		row.CreatedAt = time.Now().UTC()
+	}
+	passInt := 0
+	if row.Pass {
+		passInt = 1
+	}
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO scores(run_id,skill,score,pass,critique,judge_cfg_hash,artifact_hash,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+		row.RunID,
+		row.Skill,
+		row.Score,
+		passInt,
+		row.Critique,
+		row.JudgeCfgHash,
+		row.ArtifactHash,
+		row.CreatedAt.UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return fmt.Errorf("insert score: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) InsertJudgeRun(ctx context.Context, row JudgeRun) error {
+	if row.CreatedAt.IsZero() {
+		row.CreatedAt = time.Now().UTC()
+	}
+	passInt := 0
+	if row.Pass {
+		passInt = 1
+	}
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO judge_runs(run_id,skill,rubric_hash,judge_cfg_hash,artifact_hash,metrics_json,critique,score,pass,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		row.RunID,
+		row.Skill,
+		row.RubricHash,
+		row.JudgeCfgHash,
+		row.ArtifactHash,
+		row.MetricsJSON,
+		row.Critique,
+		row.Score,
+		passInt,
+		row.CreatedAt.UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return fmt.Errorf("insert judge_run: %w", err)
 	}
 	return nil
 }

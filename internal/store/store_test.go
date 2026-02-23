@@ -71,6 +71,41 @@ func TestStoreSchemaAndFK(t *testing.T) {
 	if err := s.InsertToolCall(ctx, ToolCall{RunID: "missing", Seq: 1, Tool: "shell.exec", InputHash: "x", OutputHash: "y"}); err == nil {
 		t.Fatalf("expected fk error for missing run in tool_calls")
 	}
+	if err := s.InsertScore(ctx, Score{
+		RunID:        run.ID,
+		Skill:        "dd",
+		Score:        0.9,
+		Pass:         true,
+		Critique:     `["ok"]`,
+		JudgeCfgHash: "sha256:cfg",
+		ArtifactHash: "sha256:art",
+	}); err != nil {
+		t.Fatalf("insert score: %v", err)
+	}
+	if err := s.InsertScore(ctx, Score{
+		RunID:        "missing",
+		Skill:        "dd",
+		Score:        0.1,
+		Pass:         false,
+		Critique:     `["bad"]`,
+		JudgeCfgHash: "sha256:cfg",
+		ArtifactHash: "sha256:art",
+	}); err == nil {
+		t.Fatalf("expected fk error for missing run in scores")
+	}
+	if err := s.InsertJudgeRun(ctx, JudgeRun{
+		RunID:        run.ID,
+		Skill:        "dd",
+		RubricHash:   "sha256:rubric",
+		JudgeCfgHash: "sha256:cfg",
+		ArtifactHash: "sha256:art",
+		MetricsJSON:  `{"format":1}`,
+		Critique:     `["ok"]`,
+		Score:        0.9,
+		Pass:         true,
+	}); err != nil {
+		t.Fatalf("insert judge_run: %v", err)
+	}
 	var idxCount int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_artifacts_run_id'`).Scan(&idxCount); err != nil {
 		t.Fatalf("query artifacts index: %v", err)
@@ -83,6 +118,18 @@ func TestStoreSchemaAndFK(t *testing.T) {
 	}
 	if idxCount != 1 {
 		t.Fatalf("expected idx_tool_calls_run_seq, got %d", idxCount)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_scores_run_created'`).Scan(&idxCount); err != nil {
+		t.Fatalf("query scores index: %v", err)
+	}
+	if idxCount != 1 {
+		t.Fatalf("expected idx_scores_run_created, got %d", idxCount)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_judge_runs_run_created'`).Scan(&idxCount); err != nil {
+		t.Fatalf("query judge_runs index: %v", err)
+	}
+	if idxCount != 1 {
+		t.Fatalf("expected idx_judge_runs_run_created, got %d", idxCount)
 	}
 }
 
@@ -125,7 +172,7 @@ CREATE TABLE runs (
 			t.Fatalf("missing migrated column %s", col)
 		}
 	}
-	for _, tbl := range []string{"tool_calls"} {
+	for _, tbl := range []string{"tool_calls", "scores", "judge_runs"} {
 		var n int
 		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, tbl).Scan(&n); err != nil {
 			t.Fatalf("query table %s: %v", tbl, err)

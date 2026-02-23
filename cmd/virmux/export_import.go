@@ -215,6 +215,16 @@ func writeRunSnapshots(db *sql.DB, runID, outDir string) error {
 		runID); err != nil {
 		return err
 	}
+	if err := snapshotRows(db, filepath.Join(outDir, "scores.json"),
+		`SELECT run_id,skill,score,pass,critique,judge_cfg_hash,artifact_hash,created_at FROM scores WHERE run_id=? ORDER BY id`,
+		runID); err != nil {
+		return err
+	}
+	if err := snapshotRows(db, filepath.Join(outDir, "judge_runs.json"),
+		`SELECT run_id,skill,rubric_hash,judge_cfg_hash,artifact_hash,metrics_json,critique,score,pass,created_at FROM judge_runs WHERE run_id=? ORDER BY id`,
+		runID); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -517,6 +527,8 @@ func importSnapshotsIntoStore(db *sql.DB, stage, bundlePath string) error {
 	var eventRows []map[string]any
 	var artRows []map[string]any
 	var toolRows []map[string]any
+	var scoreRows []map[string]any
+	var judgeRows []map[string]any
 	if err := readJSONFile(filepath.Join(stage, "db", "runs.json"), &runsRows); err != nil {
 		return err
 	}
@@ -527,6 +539,12 @@ func importSnapshotsIntoStore(db *sql.DB, stage, bundlePath string) error {
 		return err
 	}
 	if err := readJSONFile(filepath.Join(stage, "db", "tool_calls.json"), &toolRows); err != nil {
+		return err
+	}
+	if err := readJSONFile(filepath.Join(stage, "db", "scores.json"), &scoreRows); err != nil {
+		return err
+	}
+	if err := readJSONFile(filepath.Join(stage, "db", "judge_runs.json"), &judgeRows); err != nil {
 		return err
 	}
 	if len(runsRows) != 1 {
@@ -580,6 +598,20 @@ func importSnapshotsIntoStore(db *sql.DB, stage, bundlePath string) error {
 			str(row["input_ref"]), str(row["output_ref"]), str(row["stdout_ref"]), str(row["stderr_ref"]),
 			numi(row["rc"]), numi(row["dur_ms"]), numi(row["bytes_in"]), numi(row["bytes_out"]), str(row["error_code"])); err != nil {
 			return fmt.Errorf("insert imported tool_call: %w", err)
+		}
+	}
+	for _, row := range scoreRows {
+		if _, err := tx.Exec(`INSERT INTO scores(run_id,skill,score,pass,critique,judge_cfg_hash,artifact_hash,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+			str(row["run_id"]), str(row["skill"]), numf(row["score"]), numi(row["pass"]), str(row["critique"]),
+			str(row["judge_cfg_hash"]), str(row["artifact_hash"]), str(row["created_at"])); err != nil {
+			return fmt.Errorf("insert imported score: %w", err)
+		}
+	}
+	for _, row := range judgeRows {
+		if _, err := tx.Exec(`INSERT INTO judge_runs(run_id,skill,rubric_hash,judge_cfg_hash,artifact_hash,metrics_json,critique,score,pass,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			str(row["run_id"]), str(row["skill"]), str(row["rubric_hash"]), str(row["judge_cfg_hash"]),
+			str(row["artifact_hash"]), str(row["metrics_json"]), str(row["critique"]), numf(row["score"]), numi(row["pass"]), str(row["created_at"])); err != nil {
+			return fmt.Errorf("insert imported judge_run: %w", err)
 		}
 	}
 	return tx.Commit()

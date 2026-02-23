@@ -14,20 +14,25 @@ import (
 	"time"
 
 	"github.com/haris/virmux/internal/agent"
+	skilljudge "github.com/haris/virmux/internal/skill/judge"
 	skillrun "github.com/haris/virmux/internal/skill/run"
 	skillspec "github.com/haris/virmux/internal/skill/spec"
+	"github.com/haris/virmux/internal/store"
+	"github.com/haris/virmux/internal/trace"
 	"github.com/haris/virmux/internal/vm"
 )
 
 func cmdSkill(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: virmux skill <lint|run|replay>")
+		return errors.New("usage: virmux skill <lint|run|judge|replay>")
 	}
 	switch args[0] {
 	case "lint":
 		return cmdSkillLint(args[1:])
 	case "run":
 		return cmdSkillRun(args[1:])
+	case "judge":
+		return cmdSkillJudge(args[1:])
 	case "replay":
 		return cmdSkillReplay(args[1:])
 	default:
@@ -165,21 +170,164 @@ func cmdSkillReplay(args []string) error {
 	fs := flag.NewFlagSet("skill replay", flag.ContinueOnError)
 	runsDir := fs.String("runs-dir", "runs", "runs directory")
 	dbPath := fs.String("db", "runs/virmux.sqlite", "sqlite db path")
+	againstRunID := fs.String("against", "", "optional run id to compare against")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if len(fs.Args()) != 1 {
-		return errors.New("usage: virmux skill replay <run-id>")
+		return errors.New("usage: virmux skill replay <run-id> [--against <run-id>]")
 	}
 	runID := strings.TrimSpace(fs.Args()[0])
 	if runID == "" {
 		return errors.New("run id cannot be empty")
 	}
-	rep, err := skillrun.VerifyReplayHashes(*dbPath, filepath.Join(*runsDir, runID), runID)
+	var (
+		rep skillrun.ReplayReport
+		err error
+	)
+	if strings.TrimSpace(*againstRunID) != "" {
+		rep, err = skillrun.CompareReplayHashes(*dbPath, *runsDir, runID, strings.TrimSpace(*againstRunID))
+	} else {
+		rep, err = skillrun.VerifyReplayHashes(*dbPath, filepath.Join(*runsDir, runID), runID)
+	}
 	if err != nil {
 		return err
 	}
 	b, _ := json.Marshal(rep)
+	fmt.Println(string(b))
+	if !rep.Verified && !rep.Exempt {
+		return fmt.Errorf("REPLAY_MISMATCH: %s", rep.Mismatch)
+	}
+	return nil
+}
+
+func cmdSkillJudge(args []string) error {
+	fs := flag.NewFlagSet("skill judge", flag.ContinueOnError)
+	runsDir := fs.String("runs-dir", "runs", "runs directory")
+	dbPath := fs.String("db", "runs/virmux.sqlite", "sqlite db path")
+	skillsDir := fs.String("skills-dir", "skills", "skills root directory")
+	rubricPath := fs.String("rubric", "", "optional rubric path override")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if len(fs.Args()) != 1 {
+		return errors.New("usage: virmux skill judge <run-id>")
+	}
+	runID := strings.TrimSpace(fs.Args()[0])
+	if runID == "" {
+		return errors.New("run id cannot be empty")
+	}
+	runDir := filepath.Join(*runsDir, runID)
+	meta, err := readSkillRunMeta(runDir)
+	if err != nil {
+		return err
+	}
+	skillName := strings.TrimSpace(meta.Skill)
+	if skillName == "" {
+		return errors.New("skill-run.json missing skill")
+	}
+	rubric := strings.TrimSpace(*rubricPath)
+	if rubric == "" {
+		rubric = filepath.Join(*skillsDir, skillName, "rubric.yaml")
+	}
+	r, rubricHash, err := skilljudge.LoadRubric(rubric)
+	if err != nil {
+		return err
+	}
+
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	task, status, err := lookupRunTaskStatus(st, runID)
+	if err != nil {
+		return err
+	}
+	tw, err := trace.NewWriter(filepath.Join(runDir, "trace.ndjson"))
+	if err != nil {
+		return err
+	}
+	defer tw.Close()
+
+	ctx := context.Background()
+	_ = emit(ctx, st, tw, runID, task, "skill.judge.started", map[string]any{
+		"skill":       skillName,
+		"rubric":      filepath.ToSlash(rubric),
+		"rubric_hash": rubricHash,
+	}, time.Now)
+	res, err := skilljudge.Evaluate(r, rubricHash, skilljudge.Evidence{
+		RunID:       runID,
+		Skill:       skillName,
+		RunDir:      runDir,
+		RunStatus:   status,
+		ToolCalls:   meta.ToolCalls,
+		ExpectFiles: meta.ExpectFiles,
+	})
+	if err != nil {
+		return err
+	}
+	scorePath, err := skillrun.EnsureScorePlaceholder(runDir, map[string]any{
+		"run_id":         res.RunID,
+		"skill":          res.Skill,
+		"score":          res.Score,
+		"pass":           res.Pass,
+		"critique":       res.Critique,
+		"criterion":      res.Criterion,
+		"rubric_hash":    res.RubricHash,
+		"judge_cfg_hash": res.JudgeCfgHash,
+		"artifact_hash":  res.ArtifactHash,
+	})
+	if err != nil {
+		return err
+	}
+	metricsJSON, _ := json.Marshal(criteriaMap(res.Criterion))
+	critiqueJSON, _ := json.Marshal(res.Critique)
+	now := time.Now().UTC()
+	if err := st.InsertScore(ctx, store.Score{
+		RunID:        runID,
+		Skill:        skillName,
+		Score:        res.Score,
+		Pass:         res.Pass,
+		Critique:     string(critiqueJSON),
+		JudgeCfgHash: res.JudgeCfgHash,
+		ArtifactHash: res.ArtifactHash,
+		CreatedAt:    now,
+	}); err != nil {
+		return err
+	}
+	if err := st.InsertJudgeRun(ctx, store.JudgeRun{
+		RunID:        runID,
+		Skill:        skillName,
+		RubricHash:   res.RubricHash,
+		JudgeCfgHash: res.JudgeCfgHash,
+		ArtifactHash: res.ArtifactHash,
+		MetricsJSON:  string(metricsJSON),
+		Critique:     string(critiqueJSON),
+		Score:        res.Score,
+		Pass:         res.Pass,
+		CreatedAt:    now,
+	}); err != nil {
+		return err
+	}
+	if err := emit(ctx, st, tw, runID, task, "skill.judge.scored", map[string]any{
+		"skill":          skillName,
+		"score":          res.Score,
+		"pass":           res.Pass,
+		"critique":       res.Critique,
+		"criterion":      res.Criterion,
+		"score_path":     filepath.ToSlash(filepath.Base(scorePath)),
+		"rubric_hash":    res.RubricHash,
+		"judge_cfg_hash": res.JudgeCfgHash,
+		"artifact_hash":  res.ArtifactHash,
+	}, time.Now); err != nil {
+		return err
+	}
+	if err := persistRunArtifacts(ctx, st, runID, []string{scorePath}); err != nil {
+		return err
+	}
+	b, _ := json.Marshal(res)
 	fmt.Println(string(b))
 	return nil
 }
@@ -315,6 +463,7 @@ func wrapSkillRunner(inner vmRunner, skillDef skillspec.Skill, skillRef, fixture
 }
 
 func writeSkillRunMeta(runDir string, skillDef skillspec.Skill, skillRef, fixturePath string, fx skillrun.Fixture) (string, error) {
+	expectFiles := extractFixtureExpectFiles(fx.Expect)
 	out := map[string]any{
 		"skill":         skillDef.Meta.Name,
 		"skill_ref":     skillRef,
@@ -325,6 +474,9 @@ func writeSkillRunMeta(runDir string, skillDef skillspec.Skill, skillRef, fixtur
 		"allowed":       skillDef.Tools.AllowedTools,
 		"budget":        skillDef.Tools.Budget,
 		"deterministic": fx.Deterministic,
+		"expect":        fx.Expect,
+		"expect_files":  expectFiles,
+		"tool_calls":    1,
 	}
 	path := filepath.Join(runDir, "skill-run.json")
 	b, err := json.MarshalIndent(out, "", "  ")
@@ -335,6 +487,24 @@ func writeSkillRunMeta(runDir string, skillDef skillspec.Skill, skillRef, fixtur
 		return "", err
 	}
 	return path, nil
+}
+
+func extractFixtureExpectFiles(expect map[string]any) []string {
+	if expect == nil {
+		return nil
+	}
+	raw, ok := expect["files"].([]any)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, v := range raw {
+		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+			out = append(out, strings.TrimSpace(s))
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func runSkillBudgetFailure(cfg *runCommon, skillDef skillspec.Skill, fixturePath string, fx skillrun.Fixture, budgetErr error) error {
@@ -381,4 +551,51 @@ func localSkillSHA(dir string) string {
 	}
 	sum := sha256.Sum256(h)
 	return fmt.Sprintf("%x", sum[:])
+}
+
+type skillRunMeta struct {
+	Skill         string         `json:"skill"`
+	Fixture       string         `json:"fixture"`
+	Tool          string         `json:"tool"`
+	Deterministic bool           `json:"deterministic"`
+	Expect        map[string]any `json:"expect,omitempty"`
+	ToolCalls     int            `json:"tool_calls,omitempty"`
+	ExpectFiles   []string       `json:"expect_files,omitempty"`
+}
+
+func readSkillRunMeta(runDir string) (skillRunMeta, error) {
+	b, err := os.ReadFile(filepath.Join(runDir, "skill-run.json"))
+	if err != nil {
+		return skillRunMeta{}, fmt.Errorf("read skill-run.json: %w", err)
+	}
+	var meta skillRunMeta
+	if err := json.Unmarshal(b, &meta); err != nil {
+		return skillRunMeta{}, fmt.Errorf("parse skill-run.json: %w", err)
+	}
+	if len(meta.ExpectFiles) == 0 && meta.Expect != nil {
+		if raw, ok := meta.Expect["files"].([]any); ok {
+			for _, v := range raw {
+				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+					meta.ExpectFiles = append(meta.ExpectFiles, strings.TrimSpace(s))
+				}
+			}
+		}
+	}
+	return meta, nil
+}
+
+func lookupRunTaskStatus(db *store.Store, runID string) (string, string, error) {
+	var task, status string
+	if err := db.DB().QueryRow(`SELECT task,status FROM runs WHERE id=?`, runID).Scan(&task, &status); err != nil {
+		return "", "", fmt.Errorf("query run %s: %w", runID, err)
+	}
+	return task, status, nil
+}
+
+func criteriaMap(in []skilljudge.CriterionScore) map[string]float64 {
+	out := make(map[string]float64, len(in))
+	for _, c := range in {
+		out[c.ID] = c.Value
+	}
+	return out
 }

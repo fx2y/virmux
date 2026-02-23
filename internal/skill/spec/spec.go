@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	skillpkg "github.com/haris/virmux/internal/skill"
+	skilljudge "github.com/haris/virmux/internal/skill/judge"
 	yaml "gopkg.in/yaml.v2"
 )
 
@@ -174,6 +175,9 @@ func LintDirs(dirs []string, ee EligibilityEnv) ([]LintResult, error) {
 		}
 		if _, err := os.Stat(filepath.Join(d, skillpkg.RubricConfigFile)); err != nil {
 			return nil, fmt.Errorf("lint %s: missing %s", d, skillpkg.RubricConfigFile)
+		}
+		if _, _, err := skilljudge.LoadRubric(filepath.Join(d, skillpkg.RubricConfigFile)); err != nil {
+			return nil, fmt.Errorf("lint %s: %w", d, err)
 		}
 		testsPath := filepath.Join(d, "tests")
 		if info, err := os.Stat(testsPath); err != nil || !info.IsDir() {

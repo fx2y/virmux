@@ -140,11 +140,15 @@ type ToolHashRow struct {
 }
 
 type ReplayReport struct {
-	RunID     string        `json:"run_id"`
-	TracePath string        `json:"trace_path"`
-	ToolCalls int           `json:"tool_calls"`
-	Verified  bool          `json:"verified"`
-	Rows      []ToolHashRow `json:"rows,omitempty"`
+	RunID        string        `json:"run_id"`
+	AgainstRunID string        `json:"against_run_id,omitempty"`
+	TracePath    string        `json:"trace_path"`
+	ToolCalls    int           `json:"tool_calls"`
+	Verified     bool          `json:"verified"`
+	Exempt       bool          `json:"exempt,omitempty"`
+	ExemptReason string        `json:"exempt_reason,omitempty"`
+	Mismatch     string        `json:"mismatch,omitempty"`
+	Rows         []ToolHashRow `json:"rows,omitempty"`
 }
 
 func VerifyReplayHashes(dbPath, runDir, runID string) (ReplayReport, error) {
@@ -184,6 +188,82 @@ func VerifyReplayHashes(dbPath, runDir, runID string) (ReplayReport, error) {
 	return ReplayReport{
 		RunID: runID, TracePath: tracePath, ToolCalls: len(dbRows), Verified: true, Rows: dbRows,
 	}, nil
+}
+
+func CompareReplayHashes(dbPath, runsDir, runID, againstRunID string) (ReplayReport, error) {
+	if strings.TrimSpace(againstRunID) == "" {
+		return ReplayReport{}, errors.New("against run id required")
+	}
+	baseDir := filepath.Join(runsDir, runID)
+	otherDir := filepath.Join(runsDir, againstRunID)
+	baseDet, err := isDeterministicFixture(baseDir)
+	if err != nil {
+		return ReplayReport{}, err
+	}
+	otherDet, err := isDeterministicFixture(otherDir)
+	if err != nil {
+		return ReplayReport{}, err
+	}
+	if !baseDet || !otherDet {
+		return ReplayReport{
+			RunID:        runID,
+			AgainstRunID: againstRunID,
+			TracePath:    filepath.Join(baseDir, "trace.ndjson"),
+			Verified:     false,
+			Exempt:       true,
+			ExemptReason: "NONDET_FIXTURE",
+		}, nil
+	}
+	base, err := VerifyReplayHashes(dbPath, baseDir, runID)
+	if err != nil {
+		return ReplayReport{}, err
+	}
+	other, err := VerifyReplayHashes(dbPath, otherDir, againstRunID)
+	if err != nil {
+		return ReplayReport{}, err
+	}
+	out := ReplayReport{
+		RunID:        runID,
+		AgainstRunID: againstRunID,
+		TracePath:    base.TracePath,
+		ToolCalls:    len(base.Rows),
+		Verified:     true,
+		Rows:         base.Rows,
+	}
+	if len(base.Rows) != len(other.Rows) {
+		out.Verified = false
+		out.Mismatch = fmt.Sprintf("tool call count mismatch base=%d against=%d", len(base.Rows), len(other.Rows))
+		return out, nil
+	}
+	for i := range base.Rows {
+		a, b := base.Rows[i], other.Rows[i]
+		if a.Seq != b.Seq || a.Tool != b.Tool || a.InputHash != b.InputHash || a.OutputHash != b.OutputHash || a.ErrorCode != b.ErrorCode {
+			out.Verified = false
+			out.Mismatch = fmt.Sprintf("first divergence seq=%d tool=%s input=%s/%s output=%s/%s", a.Seq, a.Tool, a.InputHash, b.InputHash, a.OutputHash, b.OutputHash)
+			return out, nil
+		}
+	}
+	baseArt, err := loadArtifactHashes(baseDir)
+	if err != nil {
+		return ReplayReport{}, err
+	}
+	otherArt, err := loadArtifactHashes(otherDir)
+	if err != nil {
+		return ReplayReport{}, err
+	}
+	if len(baseArt) != len(otherArt) {
+		out.Verified = false
+		out.Mismatch = fmt.Sprintf("artifact count mismatch base=%d against=%d", len(baseArt), len(otherArt))
+		return out, nil
+	}
+	for i := range baseArt {
+		if baseArt[i] != otherArt[i] {
+			out.Verified = false
+			out.Mismatch = fmt.Sprintf("artifact divergence %s != %s", baseArt[i], otherArt[i])
+			return out, nil
+		}
+	}
+	return out, nil
 }
 
 func loadTraceToolHashes(tracePath string) ([]ToolHashRow, error) {
@@ -306,4 +386,54 @@ func EnsureScorePlaceholder(runDir string, payload map[string]any) (string, erro
 		return "", fmt.Errorf("write score placeholder: %w", err)
 	}
 	return scorePath, nil
+}
+
+func isDeterministicFixture(runDir string) (bool, error) {
+	b, err := os.ReadFile(filepath.Join(runDir, "skill-run.json"))
+	if err != nil {
+		return true, nil
+	}
+	var meta struct {
+		Deterministic *bool `json:"deterministic"`
+	}
+	if err := json.Unmarshal(b, &meta); err != nil {
+		return false, fmt.Errorf("parse skill-run.json: %w", err)
+	}
+	if meta.Deterministic == nil {
+		return true, nil
+	}
+	return *meta.Deterministic, nil
+}
+
+func loadArtifactHashes(runDir string) ([]string, error) {
+	var out []string
+	for _, root := range []string{"artifacts", "toolio"} {
+		base := filepath.Join(runDir, root)
+		if _, err := os.Stat(base); err != nil {
+			continue
+		}
+		err := filepath.Walk(base, func(path string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if !info.Mode().IsRegular() {
+				return nil
+			}
+			rel, err := filepath.Rel(runDir, path)
+			if err != nil {
+				return err
+			}
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			out = append(out, filepath.ToSlash(rel)+":"+trace.SHA256Hex(b))
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("walk artifact root: %w", err)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }

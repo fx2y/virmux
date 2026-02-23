@@ -79,6 +79,32 @@ func TestExportImportDeterministicRoundTrip(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.InsertScore(ctx, store.Score{
+		RunID:        runID,
+		Skill:        "dd",
+		Score:        0.9,
+		Pass:         true,
+		Critique:     `["ok"]`,
+		JudgeCfgHash: "sha256:cfg",
+		ArtifactHash: "sha256:art",
+		CreatedAt:    time.Date(2026, 2, 22, 0, 0, 1, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertJudgeRun(ctx, store.JudgeRun{
+		RunID:        runID,
+		Skill:        "dd",
+		RubricHash:   "sha256:rubric",
+		JudgeCfgHash: "sha256:cfg",
+		ArtifactHash: "sha256:art",
+		MetricsJSON:  `{"format":1,"completeness":1,"actionability":1}`,
+		Critique:     `["ok"]`,
+		Score:        0.9,
+		Pass:         true,
+		CreatedAt:    time.Date(2026, 2, 22, 0, 0, 1, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := st.FinishRun(ctx, runID, "ok", 1, 0, filepath.Join(runDir, "trace.ndjson"), "", 0, time.Date(2026, 2, 22, 0, 0, 1, 0, time.UTC)); err != nil {
 		t.Fatal(err)
 	}
@@ -130,6 +156,20 @@ func TestExportImportDeterministicRoundTrip(t *testing.T) {
 	}
 	if tcCount != 1 {
 		t.Fatalf("expected 1 tool_call, got %d", tcCount)
+	}
+	var scoreCount int
+	if err := ist.DB().QueryRow(`SELECT COUNT(*) FROM scores WHERE run_id=?`, runID).Scan(&scoreCount); err != nil {
+		t.Fatal(err)
+	}
+	if scoreCount != 1 {
+		t.Fatalf("expected 1 score row, got %d", scoreCount)
+	}
+	var judgeCount int
+	if err := ist.DB().QueryRow(`SELECT COUNT(*) FROM judge_runs WHERE run_id=?`, runID).Scan(&judgeCount); err != nil {
+		t.Fatal(err)
+	}
+	if judgeCount != 1 {
+		t.Fatalf("expected 1 judge_run row, got %d", judgeCount)
 	}
 }
 
