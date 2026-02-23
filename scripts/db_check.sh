@@ -49,6 +49,7 @@ fi
 
 required_indexes=(idx_events_run_id idx_runs_started_at idx_artifacts_run_id idx_tool_calls_run_seq idx_tool_calls_tool_input_hash)
 required_indexes+=(idx_scores_run_created idx_scores_skill_pass idx_judge_runs_run_created)
+required_indexes+=(idx_eval_runs_skill_created idx_eval_runs_cohort_created idx_eval_cases_run_fixture idx_promotions_skill_created)
 for idx in "${required_indexes[@]}"; do
   c="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='$idx';")"
   if [[ "$c" != "1" ]]; then
@@ -63,6 +64,12 @@ scores_table="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='ta
 [[ "$scores_table" == "1" ]] || { echo "db:check: missing table: scores" >&2; exit 1; }
 judge_runs_table="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='judge_runs';")"
 [[ "$judge_runs_table" == "1" ]] || { echo "db:check: missing table: judge_runs" >&2; exit 1; }
+eval_runs_table="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='eval_runs';")"
+[[ "$eval_runs_table" == "1" ]] || { echo "db:check: missing table: eval_runs" >&2; exit 1; }
+eval_cases_table="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='eval_cases';")"
+[[ "$eval_cases_table" == "1" ]] || { echo "db:check: missing table: eval_cases" >&2; exit 1; }
+promotions_table="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='promotions';")"
+[[ "$promotions_table" == "1" ]] || { echo "db:check: missing table: promotions" >&2; exit 1; }
 
 tool_rows="$(sqlite3 "$db" "SELECT COUNT(*) FROM tool_calls;")"
 if [[ "$tool_rows" != "0" ]]; then

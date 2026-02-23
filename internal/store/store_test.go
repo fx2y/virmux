@@ -106,6 +106,47 @@ func TestStoreSchemaAndFK(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("insert judge_run: %v", err)
 	}
+	if err := s.InsertEvalRun(ctx, EvalRun{
+		ID:            "ab-1",
+		Skill:         "dd",
+		Cohort:        "qa-skill-c3",
+		BaseRef:       "base",
+		HeadRef:       "head",
+		Provider:      "openai:gpt-4.1-mini",
+		FixturesHash:  "sha256:fixtures",
+		CfgSHA256:     "sha256:cfg",
+		ResultsSHA256: "sha256:res",
+		VerdictSHA256: "sha256:verdict",
+		VerdictJSON:   `{"pass":true}`,
+		Pass:          true,
+	}); err != nil {
+		t.Fatalf("insert eval_run: %v", err)
+	}
+	if err := s.InsertEvalCase(ctx, EvalCase{
+		EvalRunID: "ab-1",
+		FixtureID: "case01",
+		BaseScore: 0.8,
+		HeadScore: 0.9,
+		BasePass:  true,
+		HeadPass:  true,
+	}); err != nil {
+		t.Fatalf("insert eval_case: %v", err)
+	}
+	if _, err := s.GetEvalRun(ctx, "ab-1"); err != nil {
+		t.Fatalf("get eval_run: %v", err)
+	}
+	if err := s.InsertPromotion(ctx, Promotion{
+		ID:            "promo-1",
+		Skill:         "dd",
+		Tag:           "skill/dd/prod",
+		BaseRef:       "base",
+		HeadRef:       "head",
+		EvalRunID:     "ab-1",
+		VerdictSHA256: "sha256:verdict",
+		Actor:         "tester",
+	}); err != nil {
+		t.Fatalf("insert promotion: %v", err)
+	}
 	var idxCount int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_artifacts_run_id'`).Scan(&idxCount); err != nil {
 		t.Fatalf("query artifacts index: %v", err)
@@ -130,6 +171,24 @@ func TestStoreSchemaAndFK(t *testing.T) {
 	}
 	if idxCount != 1 {
 		t.Fatalf("expected idx_judge_runs_run_created, got %d", idxCount)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_eval_runs_skill_created'`).Scan(&idxCount); err != nil {
+		t.Fatalf("query eval_runs index: %v", err)
+	}
+	if idxCount != 1 {
+		t.Fatalf("expected idx_eval_runs_skill_created, got %d", idxCount)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_eval_cases_run_fixture'`).Scan(&idxCount); err != nil {
+		t.Fatalf("query eval_cases index: %v", err)
+	}
+	if idxCount != 1 {
+		t.Fatalf("expected idx_eval_cases_run_fixture, got %d", idxCount)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_promotions_skill_created'`).Scan(&idxCount); err != nil {
+		t.Fatalf("query promotions index: %v", err)
+	}
+	if idxCount != 1 {
+		t.Fatalf("expected idx_promotions_skill_created, got %d", idxCount)
 	}
 }
 
@@ -172,7 +231,7 @@ CREATE TABLE runs (
 			t.Fatalf("missing migrated column %s", col)
 		}
 	}
-	for _, tbl := range []string{"tool_calls", "scores", "judge_runs"} {
+	for _, tbl := range []string{"tool_calls", "scores", "judge_runs", "eval_runs", "eval_cases", "promotions"} {
 		var n int
 		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, tbl).Scan(&n); err != nil {
 			t.Fatalf("query table %s: %v", tbl, err)

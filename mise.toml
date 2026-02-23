@@ -278,6 +278,44 @@ run = "./scripts/skill_test_c2.sh"
 sources = ["scripts/skill_test_c2.sh", "cmd/**/*.go", "internal/**/*.go", "skills/**/*.md", "skills/**/*.yaml", "skills/**/*.json"]
 outputs = ["tmp/skill-test-c2.ok"]
 
+[tasks."skill:test:c3"]
+description = "Focused C3 eval+AB+promotion guards"
+run = "./scripts/skill_test_c3.sh"
+sources = ["scripts/skill_test_c3.sh", "scripts/skill_eval.sh", "scripts/skill_ab.sh", "scripts/skill_sql_cert.sh", "cmd/**/*.go", "internal/**/*.go", "skills/**/*.md", "skills/**/*.yaml", "skills/**/*.json", "package.json", "package-lock.json"]
+outputs = ["tmp/skill-test-c3.ok"]
+
+[tasks."skill:test"]
+description = "Combined C1..C3 skill guard lane"
+depends = ["skill:test:core", "skill:test:c2", "skill:test:c3"]
+run = "mkdir -p tmp && date -u +%FT%TZ > tmp/skill-test.ok"
+sources = ["scripts/skill_test_core.sh", "scripts/skill_test_c2.sh", "scripts/skill_test_c3.sh", "cmd/**/*.go", "internal/**/*.go", "skills/**/*.md", "skills/**/*.yaml", "skills/**/*.json"]
+outputs = ["tmp/skill-test.ok"]
+
+[tasks."skill:eval"]
+description = "Promptfoo validate for generated skill config (isolated lane)"
+run = "./scripts/skill_eval.sh"
+sources = ["scripts/skill_eval.sh", "skills/**/*.md", "skills/**/*.json", "package.json", "package-lock.json"]
+outputs = ["tmp/skill-eval.ok"]
+
+[tasks."skill:ab"]
+description = "Run deterministic fake-provider AB+promotion guard"
+depends = ["skill:eval"]
+run = "./scripts/skill_ab.sh"
+sources = ["scripts/skill_ab.sh", "cmd/**/*.go", "internal/**/*.go", "skills/**/*.md", "skills/**/*.yaml", "skills/**/*.json"]
+outputs = ["tmp/skill-ab.ok", "tmp/skill-ab-summary.json"]
+
+[tasks."skill:sql-cert"]
+description = "Cohort-scoped SQL cert for eval/promotions rows"
+run = "./scripts/skill_sql_cert.sh"
+sources = ["scripts/skill_sql_cert.sh", "runs/virmux.sqlite"]
+outputs = ["tmp/skill-sql-cert.ok", "tmp/skill-sql-cert-summary.json"]
+
+[tasks."ship:skills"]
+description = "Uncached skill lane certification (isolated from ship:core)"
+run = "./scripts/ship_skills.sh"
+sources = ["scripts/ship_skills.sh", "scripts/skill_eval.sh", "scripts/skill_ab.sh", "scripts/skill_sql_cert.sh", "scripts/skill_test_core.sh", "scripts/skill_test_c2.sh", "scripts/skill_test_c3.sh", "cmd/**/*.go", "internal/**/*.go", "skills/**/*.md", "skills/**/*.yaml", "skills/**/*.json", "package.json", "package-lock.json"]
+outputs = ["tmp/ship-skills-summary.json", "tmp/skill-sql-cert.ok"]
+
 [tasks.fmt]
 description = "Format Go and JS"
 run = ["gofmt -w $(find cmd internal -name '*.go')", "npx prettier --write scripts/pw_smoke.mjs", "mkdir -p tmp && date -u +%Y-%m-%dT%H:%M:%SZ > tmp/fmt.ok"]

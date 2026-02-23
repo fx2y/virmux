@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/haris/virmux/internal/agent"
+	skillpkg "github.com/haris/virmux/internal/skill"
+	skilleval "github.com/haris/virmux/internal/skill/eval"
 	skilljudge "github.com/haris/virmux/internal/skill/judge"
 	skillrun "github.com/haris/virmux/internal/skill/run"
 	skillspec "github.com/haris/virmux/internal/skill/spec"
@@ -24,7 +26,7 @@ import (
 
 func cmdSkill(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: virmux skill <lint|run|judge|replay>")
+		return errors.New("usage: virmux skill <lint|run|judge|replay|ab|promote>")
 	}
 	switch args[0] {
 	case "lint":
@@ -35,6 +37,10 @@ func cmdSkill(args []string) error {
 		return cmdSkillJudge(args[1:])
 	case "replay":
 		return cmdSkillReplay(args[1:])
+	case "ab":
+		return cmdSkillAB(args[1:])
+	case "promote":
+		return cmdSkillPromote(args[1:])
 	default:
 		return fmt.Errorf("unknown skill subcommand: %s", args[0])
 	}
@@ -598,4 +604,305 @@ func criteriaMap(in []skilljudge.CriterionScore) map[string]float64 {
 		out[c.ID] = c.Value
 	}
 	return out
+}
+
+func cmdSkillAB(args []string) error {
+	fs := flag.NewFlagSet("skill ab", flag.ContinueOnError)
+	repoDir := fs.String("repo-dir", ".", "git repository root")
+	skillsDir := fs.String("skills-dir", "skills", "skills directory (repo-relative)")
+	runsDir := fs.String("runs-dir", "runs", "runs directory")
+	dbPath := fs.String("db", "runs/virmux.sqlite", "sqlite db path")
+	provider := fs.String("provider", "openai:gpt-4.1-mini", "promptfoo provider string")
+	promptfooBin := fs.String("promptfoo-bin", "promptfoo", "promptfoo binary path")
+	cohort := fs.String("cohort", "", "cohort label for SQL cert scoping")
+	scoreMin := fs.Float64("score-delta-min", 0.0, "minimum allowed p50 score delta (head-base)")
+	failMax := fs.Float64("fail-rate-delta-max", 0.0, "maximum allowed fail-rate delta (head-base)")
+	costMax := fs.Float64("cost-delta-max", 0.0, "maximum allowed cost delta (head-base)")
+	costGate := fs.Bool("cost-gate", false, "enforce cost delta threshold")
+	timeoutSec := fs.Int("timeout-sec", 120, "promptfoo validate/eval timeout per side")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	pos := fs.Args()
+	if len(pos) < 2 || len(pos) > 3 {
+		return errors.New("usage: virmux skill ab <skill> <base..head>|<base> <head>")
+	}
+	skillName := strings.TrimSpace(pos[0])
+	if skillName == "" {
+		return errors.New("skill name cannot be empty")
+	}
+	baseRef := ""
+	headRef := ""
+	if len(pos) == 2 {
+		parts := strings.SplitN(pos[1], "..", 2)
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+			return errors.New("second arg must be <base..head> when only two positionals are provided")
+		}
+		baseRef = strings.TrimSpace(parts[0])
+		headRef = strings.TrimSpace(parts[1])
+	} else {
+		baseRef = strings.TrimSpace(pos[1])
+		headRef = strings.TrimSpace(pos[2])
+	}
+	if baseRef == headRef {
+		return errors.New("base and head refs must differ")
+	}
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	cohortLabel := strings.TrimSpace(*cohort)
+	if cohortLabel == "" {
+		cohortLabel = "qa-skill-c3-" + time.Now().UTC().Format("20060102")
+	}
+	ex := skilleval.OSExec{}
+	ctx := context.Background()
+	headSnap, err := skilleval.LoadSkillSnapshot(ctx, ex, *repoDir, *skillsDir, skillName, headRef)
+	if err != nil {
+		return err
+	}
+	baseSnap, err := skilleval.LoadSkillSnapshot(ctx, ex, *repoDir, *skillsDir, skillName, baseRef)
+	if err != nil {
+		return err
+	}
+	if err := skilleval.ValidateFrozenFixtureSet(headSnap.Fixtures, baseSnap.Fixtures); err != nil {
+		return fmt.Errorf("frozen fixture set violation: %w", err)
+	}
+	evalID := fmt.Sprintf("%d-skillab", time.Now().UTC().UnixNano())
+	evalDir := filepath.Join(*runsDir, evalID)
+	if err := os.MkdirAll(evalDir, 0o755); err != nil {
+		return err
+	}
+	baseCfgPath := filepath.Join(evalDir, "promptfoo.base.json")
+	headCfgPath := filepath.Join(evalDir, "promptfoo.head.json")
+	baseCfg, err := skilleval.BuildPromptfooConfig(baseSnap, *provider)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(baseCfgPath, baseCfg, 0o644); err != nil {
+		return err
+	}
+	headCfg, err := skilleval.BuildPromptfooConfig(headSnap, *provider)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(headCfgPath, headCfg, 0o644); err != nil {
+		return err
+	}
+	baseResPath := filepath.Join(evalDir, "promptfoo.base.results.json")
+	headResPath := filepath.Join(evalDir, "promptfoo.head.results.json")
+	timeout := time.Duration(*timeoutSec) * time.Second
+	if err := skilleval.RunPromptfoo(ctx, ex, *repoDir, *promptfooBin, baseCfgPath, baseResPath, timeout); err != nil {
+		return err
+	}
+	if err := skilleval.RunPromptfoo(ctx, ex, *repoDir, *promptfooBin, headCfgPath, headResPath, timeout); err != nil {
+		return err
+	}
+	baseRaw, err := os.ReadFile(baseResPath)
+	if err != nil {
+		return err
+	}
+	headRaw, err := os.ReadFile(headResPath)
+	if err != nil {
+		return err
+	}
+	ids := make([]string, 0, len(headSnap.Fixtures))
+	for _, fx := range headSnap.Fixtures {
+		ids = append(ids, fx.ID)
+	}
+	baseMetrics, baseCases, err := skilleval.ParsePromptfooResults(baseRaw, ids)
+	if err != nil {
+		return err
+	}
+	headMetrics, headCases, err := skilleval.ParsePromptfooResults(headRaw, ids)
+	if err != nil {
+		return err
+	}
+	var maxCost *float64
+	if *costGate {
+		maxCost = costMax
+	}
+	verdict := skilleval.CompareAB(baseMetrics, headMetrics, skilleval.ABThresholds{
+		MinScoreDelta:    *scoreMin,
+		MaxFailRateDelta: *failMax,
+		MaxCostDelta:     maxCost,
+	})
+	verdictPath := filepath.Join(evalDir, "ab-verdict.json")
+	verdictDoc := map[string]any{
+		"id":      evalID,
+		"skill":   skillName,
+		"cohort":  cohortLabel,
+		"base":    map[string]any{"ref": baseRef, "metrics": baseMetrics},
+		"head":    map[string]any{"ref": headRef, "metrics": headMetrics},
+		"verdict": verdict,
+		"gates": map[string]any{
+			"score_delta_min":     *scoreMin,
+			"fail_rate_delta_max": *failMax,
+			"cost_delta_max":      maxCost,
+		},
+	}
+	vb, _ := json.MarshalIndent(verdictDoc, "", "  ")
+	if err := os.WriteFile(verdictPath, append(vb, '\n'), 0o644); err != nil {
+		return err
+	}
+	cfgSum := sha256.Sum256(append(baseCfg, headCfg...))
+	resSum := sha256.Sum256(append(baseRaw, headRaw...))
+	verdictSum := sha256.Sum256(vb)
+	ctx = context.Background()
+	if err := st.InsertEvalRun(ctx, store.EvalRun{
+		ID:            evalID,
+		Skill:         skillName,
+		Cohort:        cohortLabel,
+		BaseRef:       baseRef,
+		HeadRef:       headRef,
+		Provider:      *provider,
+		FixturesHash:  skilleval.FixtureSetHash(headSnap.Fixtures),
+		CfgSHA256:     fmt.Sprintf("%x", cfgSum[:]),
+		CfgPath:       filepath.ToSlash(filepath.Join(evalID, "promptfoo.head.json")),
+		ResultsSHA256: fmt.Sprintf("%x", resSum[:]),
+		ResultsPath:   filepath.ToSlash(filepath.Join(evalID, "promptfoo.head.results.json")),
+		VerdictSHA256: fmt.Sprintf("%x", verdictSum[:]),
+		VerdictPath:   filepath.ToSlash(filepath.Join(evalID, "ab-verdict.json")),
+		ScoreP50Base:  baseMetrics.ScoreP50,
+		ScoreP50Head:  headMetrics.ScoreP50,
+		FailRateBase:  baseMetrics.FailRate,
+		FailRateHead:  headMetrics.FailRate,
+		CostTotalBase: baseMetrics.CostTotal,
+		CostTotalHead: headMetrics.CostTotal,
+		ScoreP50Delta: verdict.ScoreDelta,
+		FailRateDelta: verdict.FailRateDelta,
+		CostDelta:     verdict.CostDelta,
+		Pass:          verdict.Pass,
+		VerdictJSON:   string(vb),
+		CreatedAt:     time.Now().UTC(),
+	}); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		bc := baseCases[id]
+		hc := headCases[id]
+		if err := st.InsertEvalCase(ctx, store.EvalCase{
+			EvalRunID: evalID,
+			FixtureID: id,
+			BaseScore: bc.Score,
+			HeadScore: hc.Score,
+			BasePass:  bc.Pass,
+			HeadPass:  hc.Pass,
+			BaseCost:  bc.Cost,
+			HeadCost:  hc.Cost,
+			CreatedAt: time.Now().UTC(),
+		}); err != nil {
+			return err
+		}
+	}
+	out := map[string]any{
+		"id":     evalID,
+		"skill":  skillName,
+		"cohort": cohortLabel,
+		"pass":   verdict.Pass,
+		"reason": verdict.Reason,
+		"artifacts": map[string]any{
+			"eval_dir":     filepath.ToSlash(evalDir),
+			"verdict_path": filepath.ToSlash(verdictPath),
+		},
+		"deltas": map[string]any{
+			"score_p50_delta": verdict.ScoreDelta,
+			"fail_rate_delta": verdict.FailRateDelta,
+			"cost_delta":      verdict.CostDelta,
+			"base_ref":        baseRef,
+			"head_ref":        headRef,
+			"base_score_p50":  baseMetrics.ScoreP50,
+			"head_score_p50":  headMetrics.ScoreP50,
+			"base_fail_rate":  baseMetrics.FailRate,
+			"head_fail_rate":  headMetrics.FailRate,
+		},
+	}
+	ob, _ := json.Marshal(out)
+	fmt.Println(string(ob))
+	if !verdict.Pass {
+		return fmt.Errorf("AB_REGRESSION: %s", verdict.Reason)
+	}
+	return nil
+}
+
+func cmdSkillPromote(args []string) error {
+	fs := flag.NewFlagSet("skill promote", flag.ContinueOnError)
+	dbPath := fs.String("db", "runs/virmux.sqlite", "sqlite db path")
+	repoDir := fs.String("repo-dir", ".", "git repository root")
+	tag := fs.String("tag", "", "promotion tag (default: skill/<name>/prod)")
+	actor := fs.String("actor", "", "actor id (default: $USER)")
+	maxAgeH := fs.Int("max-age-hours", 24, "max AB verdict age before stale refusal")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if len(fs.Args()) != 2 {
+		return errors.New("usage: virmux skill promote <skill> <eval-run-id>")
+	}
+	skillName := strings.TrimSpace(fs.Args()[0])
+	evalID := strings.TrimSpace(fs.Args()[1])
+	if skillName == "" || evalID == "" {
+		return errors.New("skill and eval-run-id are required")
+	}
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	row, err := st.GetEvalRun(context.Background(), evalID)
+	if err != nil {
+		return fmt.Errorf("MISSING_AB_VERDICT: %w", err)
+	}
+	if row.Skill != skillName {
+		return fmt.Errorf("MISSING_AB_VERDICT: eval run skill=%s does not match %s", row.Skill, skillName)
+	}
+	if !row.Pass {
+		return fmt.Errorf("MISSING_AB_VERDICT: eval run %s is not passing", evalID)
+	}
+	maxAge := time.Duration(*maxAgeH) * time.Hour
+	if maxAge > 0 && !row.CreatedAt.IsZero() && time.Since(row.CreatedAt) > maxAge {
+		return fmt.Errorf("STALE_AB_VERDICT: eval run %s older than %s", evalID, maxAge)
+	}
+	promoTag := strings.TrimSpace(*tag)
+	if promoTag == "" {
+		promoTag = fmt.Sprintf("skill/%s/prod", skillName)
+	}
+	promoActor := strings.TrimSpace(*actor)
+	if promoActor == "" {
+		promoActor = strings.TrimSpace(os.Getenv("USER"))
+	}
+	ex := skilleval.OSExec{}
+	if _, err := ex.Run(context.Background(), skillpkg.Command{
+		Dir:  *repoDir,
+		Name: "git",
+		Args: []string{"tag", "-f", promoTag, row.HeadRef},
+	}); err != nil {
+		return fmt.Errorf("move promotion tag: %w", err)
+	}
+	promoID := fmt.Sprintf("%d-promote", time.Now().UTC().UnixNano())
+	if err := st.InsertPromotion(context.Background(), store.Promotion{
+		ID:            promoID,
+		Skill:         skillName,
+		Tag:           promoTag,
+		BaseRef:       row.BaseRef,
+		HeadRef:       row.HeadRef,
+		EvalRunID:     row.ID,
+		VerdictSHA256: row.VerdictSHA256,
+		Actor:         promoActor,
+		CreatedAt:     time.Now().UTC(),
+	}); err != nil {
+		return err
+	}
+	out := map[string]any{
+		"id":          promoID,
+		"skill":       skillName,
+		"tag":         promoTag,
+		"eval_run_id": row.ID,
+		"base_ref":    row.BaseRef,
+		"head_ref":    row.HeadRef,
+		"actor":       promoActor,
+	}
+	b, _ := json.Marshal(out)
+	fmt.Println(string(b))
+	return nil
 }

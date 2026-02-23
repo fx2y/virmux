@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -102,5 +104,114 @@ func TestCmdSkillJudgeWritesScoreRowsAndTraceEvent(t *testing.T) {
 	}
 	if judgeEvents != 1 {
 		t.Fatalf("expected one skill.judge.scored event, got %d", judgeEvents)
+	}
+}
+
+func TestCmdSkillPromoteRefusesStaleVerdict(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	dbPath := filepath.Join(tmp, "runs", "virmux.sqlite")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertEvalRun(context.Background(), store.EvalRun{
+		ID:            "ab-stale",
+		Skill:         "dd",
+		Cohort:        "qa-skill-c3",
+		BaseRef:       "base",
+		HeadRef:       "head",
+		Provider:      "openai:gpt-4.1-mini",
+		FixturesHash:  "sha256:fx",
+		CfgSHA256:     "sha256:cfg",
+		ResultsSHA256: "sha256:res",
+		VerdictSHA256: "sha256:verdict",
+		VerdictJSON:   `{"pass":true}`,
+		Pass:          true,
+		CreatedAt:     time.Now().UTC().Add(-48 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+	err = cmdSkillPromote([]string{"--db", dbPath, "--repo-dir", tmp, "dd", "ab-stale"})
+	if err == nil || !strings.Contains(err.Error(), "STALE_AB_VERDICT") {
+		t.Fatalf("expected stale verdict refusal, got %v", err)
+	}
+}
+
+func TestCmdSkillPromoteWritesTagAndPromotionRow(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	repo := filepath.Join(tmp, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, string(out))
+		}
+	}
+	run("init")
+	run("config", "user.email", "test@example.com")
+	run("config", "user.name", "tester")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "README.md")
+	run("commit", "-m", "init")
+	out, err := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	headRef := strings.TrimSpace(string(out))
+
+	dbPath := filepath.Join(tmp, "runs", "virmux.sqlite")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertEvalRun(context.Background(), store.EvalRun{
+		ID:            "ab-pass",
+		Skill:         "dd",
+		Cohort:        "qa-skill-c3",
+		BaseRef:       headRef,
+		HeadRef:       headRef,
+		Provider:      "openai:gpt-4.1-mini",
+		FixturesHash:  "sha256:fx",
+		CfgSHA256:     "sha256:cfg",
+		ResultsSHA256: "sha256:res",
+		VerdictSHA256: "sha256:verdict",
+		VerdictJSON:   `{"pass":true}`,
+		Pass:          true,
+		CreatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+	tag := "skill/dd/prod"
+	if err := cmdSkillPromote([]string{"--db", dbPath, "--repo-dir", repo, "--tag", tag, "dd", "ab-pass"}); err != nil {
+		t.Fatalf("cmdSkillPromote: %v", err)
+	}
+	gotTag, err := exec.Command("git", "-C", repo, "rev-list", "-n", "1", tag).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(gotTag)) != headRef {
+		t.Fatalf("tag ref mismatch got=%s want=%s", strings.TrimSpace(string(gotTag)), headRef)
+	}
+	ist, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ist.Close()
+	var n int
+	if err := ist.DB().QueryRow(`SELECT COUNT(*) FROM promotions WHERE skill='dd'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("expected one promotion row, got %d", n)
 	}
 }

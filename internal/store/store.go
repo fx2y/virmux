@@ -71,6 +71,58 @@ type JudgeRun struct {
 	CreatedAt    time.Time
 }
 
+type EvalRun struct {
+	ID            string
+	Skill         string
+	Cohort        string
+	BaseRef       string
+	HeadRef       string
+	Provider      string
+	FixturesHash  string
+	CfgSHA256     string
+	CfgPath       string
+	ResultsSHA256 string
+	ResultsPath   string
+	VerdictSHA256 string
+	VerdictPath   string
+	ScoreP50Base  float64
+	ScoreP50Head  float64
+	FailRateBase  float64
+	FailRateHead  float64
+	CostTotalBase float64
+	CostTotalHead float64
+	ScoreP50Delta float64
+	FailRateDelta float64
+	CostDelta     float64
+	Pass          bool
+	VerdictJSON   string
+	CreatedAt     time.Time
+}
+
+type EvalCase struct {
+	EvalRunID string
+	FixtureID string
+	BaseScore float64
+	HeadScore float64
+	BasePass  bool
+	HeadPass  bool
+	BaseCost  float64
+	HeadCost  float64
+	CreatedAt time.Time
+}
+
+type Promotion struct {
+	ID            string
+	Skill         string
+	Tag           string
+	BaseRef       string
+	HeadRef       string
+	EvalRunID     string
+	VerdictSHA256 string
+	Actor         string
+	CreatedAt     time.Time
+}
+
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create db dir: %w", err)
@@ -185,6 +237,58 @@ CREATE TABLE IF NOT EXISTS judge_runs (
   created_at TEXT NOT NULL,
   FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS eval_runs (
+  id TEXT PRIMARY KEY,
+  skill TEXT NOT NULL,
+  cohort TEXT NOT NULL DEFAULT '',
+  base_ref TEXT NOT NULL,
+  head_ref TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  fixtures_hash TEXT NOT NULL,
+  cfg_sha256 TEXT NOT NULL,
+  cfg_path TEXT NOT NULL DEFAULT '',
+  results_sha256 TEXT NOT NULL,
+  results_path TEXT NOT NULL DEFAULT '',
+  verdict_sha256 TEXT NOT NULL,
+  verdict_path TEXT NOT NULL DEFAULT '',
+  score_p50_base REAL NOT NULL DEFAULT 0,
+  score_p50_head REAL NOT NULL DEFAULT 0,
+  fail_rate_base REAL NOT NULL DEFAULT 0,
+  fail_rate_head REAL NOT NULL DEFAULT 0,
+  cost_total_base REAL NOT NULL DEFAULT 0,
+  cost_total_head REAL NOT NULL DEFAULT 0,
+  score_p50_delta REAL NOT NULL DEFAULT 0,
+  fail_rate_delta REAL NOT NULL DEFAULT 0,
+  cost_delta REAL NOT NULL DEFAULT 0,
+  pass INTEGER NOT NULL DEFAULT 0,
+  verdict_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS eval_cases (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  eval_run_id TEXT NOT NULL,
+  fixture_id TEXT NOT NULL,
+  base_score REAL NOT NULL DEFAULT 0,
+  head_score REAL NOT NULL DEFAULT 0,
+  base_pass INTEGER NOT NULL DEFAULT 0,
+  head_pass INTEGER NOT NULL DEFAULT 0,
+  base_cost REAL NOT NULL DEFAULT 0,
+  head_cost REAL NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(eval_run_id) REFERENCES eval_runs(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS promotions (
+  id TEXT PRIMARY KEY,
+  skill TEXT NOT NULL,
+  tag TEXT NOT NULL,
+  base_ref TEXT NOT NULL,
+  head_ref TEXT NOT NULL,
+  eval_run_id TEXT NOT NULL,
+  verdict_sha256 TEXT NOT NULL,
+  actor TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(eval_run_id) REFERENCES eval_runs(id) ON DELETE RESTRICT
+);
 CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id);
 CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at);
 CREATE INDEX IF NOT EXISTS idx_artifacts_run_id ON artifacts(run_id);
@@ -193,6 +297,10 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_tool_input_hash ON tool_calls(tool,inp
 CREATE INDEX IF NOT EXISTS idx_scores_run_created ON scores(run_id,created_at);
 CREATE INDEX IF NOT EXISTS idx_scores_skill_pass ON scores(skill,pass);
 CREATE INDEX IF NOT EXISTS idx_judge_runs_run_created ON judge_runs(run_id,created_at);
+CREATE INDEX IF NOT EXISTS idx_eval_runs_skill_created ON eval_runs(skill,created_at);
+CREATE INDEX IF NOT EXISTS idx_eval_runs_cohort_created ON eval_runs(cohort,created_at);
+CREATE INDEX IF NOT EXISTS idx_eval_cases_run_fixture ON eval_cases(eval_run_id,fixture_id);
+CREATE INDEX IF NOT EXISTS idx_promotions_skill_created ON promotions(skill,created_at);
 `
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("ensure schema: %w", err)
@@ -382,6 +490,148 @@ func (s *Store) InsertJudgeRun(ctx context.Context, row JudgeRun) error {
 	)
 	if err != nil {
 		return fmt.Errorf("insert judge_run: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) InsertEvalRun(ctx context.Context, row EvalRun) error {
+	if row.CreatedAt.IsZero() {
+		row.CreatedAt = time.Now().UTC()
+	}
+	passInt := 0
+	if row.Pass {
+		passInt = 1
+	}
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO eval_runs(id,skill,cohort,base_ref,head_ref,provider,fixtures_hash,cfg_sha256,cfg_path,results_sha256,results_path,verdict_sha256,verdict_path,score_p50_base,score_p50_head,fail_rate_base,fail_rate_head,cost_total_base,cost_total_head,score_p50_delta,fail_rate_delta,cost_delta,pass,verdict_json,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		row.ID,
+		row.Skill,
+		row.Cohort,
+		row.BaseRef,
+		row.HeadRef,
+		row.Provider,
+		row.FixturesHash,
+		row.CfgSHA256,
+		row.CfgPath,
+		row.ResultsSHA256,
+		row.ResultsPath,
+		row.VerdictSHA256,
+		row.VerdictPath,
+		row.ScoreP50Base,
+		row.ScoreP50Head,
+		row.FailRateBase,
+		row.FailRateHead,
+		row.CostTotalBase,
+		row.CostTotalHead,
+		row.ScoreP50Delta,
+		row.FailRateDelta,
+		row.CostDelta,
+		passInt,
+		row.VerdictJSON,
+		row.CreatedAt.UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return fmt.Errorf("insert eval_run: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) InsertEvalCase(ctx context.Context, row EvalCase) error {
+	if row.CreatedAt.IsZero() {
+		row.CreatedAt = time.Now().UTC()
+	}
+	basePass := 0
+	headPass := 0
+	if row.BasePass {
+		basePass = 1
+	}
+	if row.HeadPass {
+		headPass = 1
+	}
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO eval_cases(eval_run_id,fixture_id,base_score,head_score,base_pass,head_pass,base_cost,head_cost,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		row.EvalRunID,
+		row.FixtureID,
+		row.BaseScore,
+		row.HeadScore,
+		basePass,
+		headPass,
+		row.BaseCost,
+		row.HeadCost,
+		row.CreatedAt.UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return fmt.Errorf("insert eval_case: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetEvalRun(ctx context.Context, id string) (EvalRun, error) {
+	var row EvalRun
+	var passInt int
+	var created string
+	err := s.db.QueryRowContext(
+		ctx,
+		`SELECT id,skill,cohort,base_ref,head_ref,provider,fixtures_hash,cfg_sha256,cfg_path,results_sha256,results_path,verdict_sha256,verdict_path,score_p50_base,score_p50_head,fail_rate_base,fail_rate_head,cost_total_base,cost_total_head,score_p50_delta,fail_rate_delta,cost_delta,pass,verdict_json,created_at
+		 FROM eval_runs WHERE id=?`,
+		id,
+	).Scan(
+		&row.ID,
+		&row.Skill,
+		&row.Cohort,
+		&row.BaseRef,
+		&row.HeadRef,
+		&row.Provider,
+		&row.FixturesHash,
+		&row.CfgSHA256,
+		&row.CfgPath,
+		&row.ResultsSHA256,
+		&row.ResultsPath,
+		&row.VerdictSHA256,
+		&row.VerdictPath,
+		&row.ScoreP50Base,
+		&row.ScoreP50Head,
+		&row.FailRateBase,
+		&row.FailRateHead,
+		&row.CostTotalBase,
+		&row.CostTotalHead,
+		&row.ScoreP50Delta,
+		&row.FailRateDelta,
+		&row.CostDelta,
+		&passInt,
+		&row.VerdictJSON,
+		&created,
+	)
+	if err != nil {
+		return EvalRun{}, fmt.Errorf("query eval_run %s: %w", id, err)
+	}
+	row.Pass = passInt != 0
+	row.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	return row, nil
+}
+
+func (s *Store) InsertPromotion(ctx context.Context, row Promotion) error {
+	if row.CreatedAt.IsZero() {
+		row.CreatedAt = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO promotions(id,skill,tag,base_ref,head_ref,eval_run_id,verdict_sha256,actor,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		row.ID,
+		row.Skill,
+		row.Tag,
+		row.BaseRef,
+		row.HeadRef,
+		row.EvalRunID,
+		row.VerdictSHA256,
+		row.Actor,
+		row.CreatedAt.UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return fmt.Errorf("insert promotion: %w", err)
 	}
 	return nil
 }
