@@ -82,6 +82,37 @@ func LoadFixture(path string) (Fixture, error) {
 	return f, nil
 }
 
+// ResolveFixturePath keeps fixture path selection deterministic while allowing
+// both repo-relative and skill-relative fixture arguments.
+func ResolveFixturePath(skillDir, fixtureArg string) string {
+	raw := strings.TrimSpace(fixtureArg)
+	if raw == "" {
+		return raw
+	}
+	if filepath.IsAbs(raw) {
+		return filepath.Clean(raw)
+	}
+	candidates := make([]string, 0, 3)
+	add := func(p string) {
+		p = filepath.Clean(p)
+		for _, seen := range candidates {
+			if seen == p {
+				return
+			}
+		}
+		candidates = append(candidates, p)
+	}
+	add(raw)
+	add(filepath.Join(skillDir, raw))
+	add(filepath.Join(skillDir, "tests", raw))
+	for _, p := range candidates {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
+		}
+	}
+	return candidates[len(candidates)-1]
+}
+
 func NewBudgetTracker(b Budget, started time.Time) *BudgetTracker {
 	if started.IsZero() {
 		started = time.Now().UTC()

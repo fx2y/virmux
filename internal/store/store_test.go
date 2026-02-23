@@ -150,6 +150,30 @@ func TestStoreSchemaAndFK(t *testing.T) {
 	if _, err := s.LatestEvalRunBySkill(ctx, "dd"); err != nil {
 		t.Fatalf("latest eval by skill: %v", err)
 	}
+	if err := s.InsertEvalRun(ctx, EvalRun{
+		ID:            "ab-2",
+		Skill:         "dd",
+		Cohort:        "qa",
+		BaseRef:       "b",
+		HeadRef:       "h",
+		Provider:      "fake",
+		FixturesHash:  "sha256:fx2",
+		CfgSHA256:     "sha256:cfg2",
+		ResultsSHA256: "sha256:res2",
+		VerdictSHA256: "sha256:ver2",
+		VerdictJSON:   `{"pass":false}`,
+		Pass:          false,
+		CreatedAt:     time.Now().UTC().Add(1 * time.Minute),
+	}); err != nil {
+		t.Fatalf("insert eval_run fail row: %v", err)
+	}
+	latestPass, err := s.LatestPassingEvalRunBySkill(ctx, "dd")
+	if err != nil {
+		t.Fatalf("latest passing eval by skill: %v", err)
+	}
+	if latestPass.ID != "ab-1" || !latestPass.Pass {
+		t.Fatalf("expected latest passing row ab-1, got %+v", latestPass)
+	}
 	if err := s.InsertRefineRun(ctx, RefineRun{
 		ID:         "ref-1",
 		RunID:      run.ID,
