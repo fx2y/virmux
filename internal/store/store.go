@@ -123,6 +123,21 @@ type Promotion struct {
 	CreatedAt     time.Time
 }
 
+type RefineRun struct {
+	ID         string
+	RunID      string
+	Skill      string
+	EvalRunID  string
+	Branch     string
+	CommitSHA  string
+	PatchHash  string
+	PatchPath  string
+	PRBodyPath string
+	HunkCount  int
+	ToolsEdit  bool
+	CreatedAt  time.Time
+}
+
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create db dir: %w", err)
@@ -289,6 +304,21 @@ CREATE TABLE IF NOT EXISTS promotions (
   created_at TEXT NOT NULL,
   FOREIGN KEY(eval_run_id) REFERENCES eval_runs(id) ON DELETE RESTRICT
 );
+CREATE TABLE IF NOT EXISTS refine_runs (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  skill TEXT NOT NULL,
+  eval_run_id TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  patch_hash TEXT NOT NULL,
+  patch_path TEXT NOT NULL DEFAULT '',
+  pr_body_path TEXT NOT NULL DEFAULT '',
+  hunk_count INTEGER NOT NULL DEFAULT 0,
+  tools_edit INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+);
 CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id);
 CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at);
 CREATE INDEX IF NOT EXISTS idx_artifacts_run_id ON artifacts(run_id);
@@ -301,6 +331,8 @@ CREATE INDEX IF NOT EXISTS idx_eval_runs_skill_created ON eval_runs(skill,create
 CREATE INDEX IF NOT EXISTS idx_eval_runs_cohort_created ON eval_runs(cohort,created_at);
 CREATE INDEX IF NOT EXISTS idx_eval_cases_run_fixture ON eval_cases(eval_run_id,fixture_id);
 CREATE INDEX IF NOT EXISTS idx_promotions_skill_created ON promotions(skill,created_at);
+CREATE INDEX IF NOT EXISTS idx_refine_runs_run_created ON refine_runs(run_id,created_at);
+CREATE INDEX IF NOT EXISTS idx_refine_runs_skill_created ON refine_runs(skill,created_at);
 `
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("ensure schema: %w", err)
@@ -634,4 +666,78 @@ func (s *Store) InsertPromotion(ctx context.Context, row Promotion) error {
 		return fmt.Errorf("insert promotion: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) InsertRefineRun(ctx context.Context, row RefineRun) error {
+	if row.CreatedAt.IsZero() {
+		row.CreatedAt = time.Now().UTC()
+	}
+	toolsEdit := 0
+	if row.ToolsEdit {
+		toolsEdit = 1
+	}
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO refine_runs(id,run_id,skill,eval_run_id,branch,commit_sha,patch_hash,patch_path,pr_body_path,hunk_count,tools_edit,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		row.ID,
+		row.RunID,
+		row.Skill,
+		row.EvalRunID,
+		row.Branch,
+		row.CommitSHA,
+		row.PatchHash,
+		row.PatchPath,
+		row.PRBodyPath,
+		row.HunkCount,
+		toolsEdit,
+		row.CreatedAt.UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return fmt.Errorf("insert refine_run: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) LatestEvalRunBySkill(ctx context.Context, skill string) (EvalRun, error) {
+	var row EvalRun
+	var passInt int
+	var created string
+	err := s.db.QueryRowContext(
+		ctx,
+		`SELECT id,skill,cohort,base_ref,head_ref,provider,fixtures_hash,cfg_sha256,cfg_path,results_sha256,results_path,verdict_sha256,verdict_path,score_p50_base,score_p50_head,fail_rate_base,fail_rate_head,cost_total_base,cost_total_head,score_p50_delta,fail_rate_delta,cost_delta,pass,verdict_json,created_at
+		 FROM eval_runs WHERE skill=? ORDER BY datetime(created_at) DESC, id DESC LIMIT 1`,
+		skill,
+	).Scan(
+		&row.ID,
+		&row.Skill,
+		&row.Cohort,
+		&row.BaseRef,
+		&row.HeadRef,
+		&row.Provider,
+		&row.FixturesHash,
+		&row.CfgSHA256,
+		&row.CfgPath,
+		&row.ResultsSHA256,
+		&row.ResultsPath,
+		&row.VerdictSHA256,
+		&row.VerdictPath,
+		&row.ScoreP50Base,
+		&row.ScoreP50Head,
+		&row.FailRateBase,
+		&row.FailRateHead,
+		&row.CostTotalBase,
+		&row.CostTotalHead,
+		&row.ScoreP50Delta,
+		&row.FailRateDelta,
+		&row.CostDelta,
+		&passInt,
+		&row.VerdictJSON,
+		&created,
+	)
+	if err != nil {
+		return EvalRun{}, fmt.Errorf("query latest eval_run skill=%s: %w", skill, err)
+	}
+	row.Pass = passInt != 0
+	row.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	return row, nil
 }

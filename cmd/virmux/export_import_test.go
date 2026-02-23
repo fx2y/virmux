@@ -105,6 +105,39 @@ func TestExportImportDeterministicRoundTrip(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.InsertEvalRun(ctx, store.EvalRun{
+		ID:            "ab-exp",
+		Skill:         "dd",
+		Cohort:        "qa-skill-c4",
+		BaseRef:       "base",
+		HeadRef:       "head",
+		Provider:      "openai:gpt-4.1-mini",
+		FixturesHash:  "sha256:fixtures",
+		CfgSHA256:     "sha256:cfg",
+		ResultsSHA256: "sha256:res",
+		VerdictSHA256: "sha256:verdict",
+		VerdictJSON:   `{"pass":true}`,
+		Pass:          true,
+		CreatedAt:     time.Date(2026, 2, 22, 0, 0, 1, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertRefineRun(ctx, store.RefineRun{
+		ID:         "ref-exp",
+		RunID:      runID,
+		Skill:      "dd",
+		EvalRunID:  "ab-exp",
+		Branch:     "refine/dd/rid-exp",
+		CommitSHA:  "abc123",
+		PatchHash:  "sha256:patch",
+		PatchPath:  "rid-exp/refine.patch",
+		PRBodyPath: "rid-exp/refine-pr.md",
+		HunkCount:  1,
+		ToolsEdit:  false,
+		CreatedAt:  time.Date(2026, 2, 22, 0, 0, 1, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := st.FinishRun(ctx, runID, "ok", 1, 0, filepath.Join(runDir, "trace.ndjson"), "", 0, time.Date(2026, 2, 22, 0, 0, 1, 0, time.UTC)); err != nil {
 		t.Fatal(err)
 	}
@@ -170,6 +203,13 @@ func TestExportImportDeterministicRoundTrip(t *testing.T) {
 	}
 	if judgeCount != 1 {
 		t.Fatalf("expected 1 judge_run row, got %d", judgeCount)
+	}
+	var refineCount int
+	if err := ist.DB().QueryRow(`SELECT COUNT(*) FROM refine_runs WHERE run_id=?`, runID).Scan(&refineCount); err != nil {
+		t.Fatal(err)
+	}
+	if refineCount != 1 {
+		t.Fatalf("expected 1 refine_run row, got %d", refineCount)
 	}
 }
 

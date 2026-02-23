@@ -225,6 +225,11 @@ func writeRunSnapshots(db *sql.DB, runID, outDir string) error {
 		runID); err != nil {
 		return err
 	}
+	if err := snapshotRows(db, filepath.Join(outDir, "refine_runs.json"),
+		`SELECT id,run_id,skill,eval_run_id,branch,commit_sha,patch_hash,patch_path,pr_body_path,hunk_count,tools_edit,created_at FROM refine_runs WHERE run_id=? ORDER BY id`,
+		runID); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -529,6 +534,7 @@ func importSnapshotsIntoStore(db *sql.DB, stage, bundlePath string) error {
 	var toolRows []map[string]any
 	var scoreRows []map[string]any
 	var judgeRows []map[string]any
+	var refineRows []map[string]any
 	if err := readJSONFile(filepath.Join(stage, "db", "runs.json"), &runsRows); err != nil {
 		return err
 	}
@@ -546,6 +552,12 @@ func importSnapshotsIntoStore(db *sql.DB, stage, bundlePath string) error {
 	}
 	if err := readJSONFile(filepath.Join(stage, "db", "judge_runs.json"), &judgeRows); err != nil {
 		return err
+	}
+	if err := readJSONFile(filepath.Join(stage, "db", "refine_runs.json"), &refineRows); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		refineRows = nil
 	}
 	if len(runsRows) != 1 {
 		return fmt.Errorf("bundle runs.json must contain exactly 1 row")
@@ -612,6 +624,13 @@ func importSnapshotsIntoStore(db *sql.DB, stage, bundlePath string) error {
 			str(row["run_id"]), str(row["skill"]), str(row["rubric_hash"]), str(row["judge_cfg_hash"]),
 			str(row["artifact_hash"]), str(row["metrics_json"]), str(row["critique"]), numf(row["score"]), numi(row["pass"]), str(row["created_at"])); err != nil {
 			return fmt.Errorf("insert imported judge_run: %w", err)
+		}
+	}
+	for _, row := range refineRows {
+		if _, err := tx.Exec(`INSERT INTO refine_runs(id,run_id,skill,eval_run_id,branch,commit_sha,patch_hash,patch_path,pr_body_path,hunk_count,tools_edit,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+			str(row["id"]), str(row["run_id"]), str(row["skill"]), str(row["eval_run_id"]), str(row["branch"]),
+			str(row["commit_sha"]), str(row["patch_hash"]), str(row["patch_path"]), str(row["pr_body_path"]), numi(row["hunk_count"]), numi(row["tools_edit"]), str(row["created_at"])); err != nil {
+			return fmt.Errorf("insert imported refine_run: %w", err)
 		}
 	}
 	return tx.Commit()

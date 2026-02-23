@@ -26,7 +26,7 @@ import (
 
 func cmdSkill(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: virmux skill <lint|run|judge|replay|ab|promote>")
+		return errors.New("usage: virmux skill <lint|run|judge|replay|ab|promote|refine>")
 	}
 	switch args[0] {
 	case "lint":
@@ -41,6 +41,8 @@ func cmdSkill(args []string) error {
 		return cmdSkillAB(args[1:])
 	case "promote":
 		return cmdSkillPromote(args[1:])
+	case "refine":
+		return cmdSkillRefine(args[1:])
 	default:
 		return fmt.Errorf("unknown skill subcommand: %s", args[0])
 	}

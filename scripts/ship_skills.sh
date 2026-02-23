@@ -12,12 +12,13 @@ mise run skill:lint
 mise run skill:test:core
 mise run skill:test:c2
 mise run skill:test:c3
+mise run skill:test:c4
 
 jq -n \
   --arg cert_ts "$cert_ts" \
   --arg cohort "$cohort" \
   --arg finished_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-  '{cert_ts:$cert_ts,cohort:$cohort,finished_at:$finished_at,tasks:["skill:lint","skill:test:core","skill:test:c2","skill:test:c3"]}' \
+  '{cert_ts:$cert_ts,cohort:$cohort,finished_at:$finished_at,tasks:["skill:lint","skill:test:core","skill:test:c2","skill:test:c3","skill:test:c4"]}' \
   > "$root/tmp/ship-skills-summary.json"
 
 echo "ship:skills: OK"

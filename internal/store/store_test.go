@@ -147,6 +147,24 @@ func TestStoreSchemaAndFK(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("insert promotion: %v", err)
 	}
+	if _, err := s.LatestEvalRunBySkill(ctx, "dd"); err != nil {
+		t.Fatalf("latest eval by skill: %v", err)
+	}
+	if err := s.InsertRefineRun(ctx, RefineRun{
+		ID:         "ref-1",
+		RunID:      run.ID,
+		Skill:      "dd",
+		EvalRunID:  "ab-1",
+		Branch:     "refine/dd/run-1",
+		CommitSHA:  "abc123",
+		PatchHash:  "sha256:patch",
+		PatchPath:  "runs/run-1/refine.patch",
+		PRBodyPath: "runs/run-1/refine-pr.md",
+		HunkCount:  1,
+		ToolsEdit:  false,
+	}); err != nil {
+		t.Fatalf("insert refine_run: %v", err)
+	}
 	var idxCount int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_artifacts_run_id'`).Scan(&idxCount); err != nil {
 		t.Fatalf("query artifacts index: %v", err)
@@ -190,6 +208,12 @@ func TestStoreSchemaAndFK(t *testing.T) {
 	if idxCount != 1 {
 		t.Fatalf("expected idx_promotions_skill_created, got %d", idxCount)
 	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_refine_runs_run_created'`).Scan(&idxCount); err != nil {
+		t.Fatalf("query refine_runs index: %v", err)
+	}
+	if idxCount != 1 {
+		t.Fatalf("expected idx_refine_runs_run_created, got %d", idxCount)
+	}
 }
 
 func TestOpenMigratesLegacyRunsTable(t *testing.T) {
@@ -231,7 +255,7 @@ CREATE TABLE runs (
 			t.Fatalf("missing migrated column %s", col)
 		}
 	}
-	for _, tbl := range []string{"tool_calls", "scores", "judge_runs", "eval_runs", "eval_cases", "promotions"} {
+	for _, tbl := range []string{"tool_calls", "scores", "judge_runs", "eval_runs", "eval_cases", "promotions", "refine_runs"} {
 		var n int
 		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, tbl).Scan(&n); err != nil {
 			t.Fatalf("query table %s: %v", tbl, err)
