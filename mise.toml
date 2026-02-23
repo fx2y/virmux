@@ -203,6 +203,11 @@ run = "./scripts/cleanup_audit.sh"
 sources = ["scripts/cleanup_audit.sh", "scripts/common.sh", "runs/.last-smoke-parallel", "runs/**/*"]
 outputs = ["tmp/cleanup-audit.ok", "tmp/cleanup-audit.log"]
 
+[tasks."vm:cleanup"]
+description = "Actually remove stale firecracker process/socket/vsock/fifo leftovers"
+run = "./scripts/vm_cleanup.sh"
+sources = ["scripts/vm_cleanup.sh", "scripts/common.sh"]
+
 [tasks."trace:validate"]
 description = "Validate trace JSONL schema contract"
 run = "./scripts/trace_validate.sh"

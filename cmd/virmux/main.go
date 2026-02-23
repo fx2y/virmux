@@ -929,12 +929,23 @@ func maybeAutoExportFailure(ctx context.Context, cfg *runCommon, st *store.Store
 }
 
 func persistRunArtifacts(ctx context.Context, st *store.Store, runID string, paths []string) error {
-	seen := map[string]struct{}{}
+	seen := map[string]string{} // path -> sha256
+	// Deduplicate input paths and existing registrations for this run
+	existing, _ := st.DB().Query(`SELECT path, sha256 FROM artifacts WHERE run_id=?`, runID)
+	if existing != nil {
+		defer existing.Close()
+		for existing.Next() {
+			var p, s string
+			if err := existing.Scan(&p, &s); err == nil {
+				seen[p] = s
+			}
+		}
+	}
+
 	for _, p := range paths {
 		if strings.TrimSpace(p) == "" {
 			continue
 		}
-		seen[p] = struct{}{}
 		sum, size, include, err := collectArtifactRecord(p)
 		if err != nil {
 			return err
@@ -942,6 +953,14 @@ func persistRunArtifacts(ctx context.Context, st *store.Store, runID string, pat
 		if !include {
 			continue
 		}
+		if oldSum, ok := seen[p]; ok {
+			if oldSum == sum {
+				continue
+			}
+			// Update: remove old registration if hash changed
+			st.DB().ExecContext(ctx, `DELETE FROM artifacts WHERE run_id=? AND path=?`, runID, p)
+		}
+		seen[p] = sum
 		if err := st.InsertArtifact(ctx, runID, p, sum, size); err != nil {
 			return err
 		}

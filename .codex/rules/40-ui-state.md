@@ -8,16 +8,11 @@ paths:
   - "**/*.css"
 ---
 # UI + State Rules (future-facing)
-- UI is an operator console, not marketing: terse copy, explicit statuses, no decorative ambiguity.
-- Backend contracts are source-of-truth (`runs`,`events`,`tool_calls`,`artifacts`,`trace`); UI must not invent alternate models.
-- State split is strict:
-- server state = immutable snapshots keyed by IDs.
-- UI state = ephemeral controls only (filters/sort/panels).
-- derived state = pure selectors; no duplicated denormalized caches.
-- Render contract:
-- timestamps default UTC.
-- raw IDs/enums/modes stay visible (no lossy prettification).
-- resume keys (`resume_mode`,`resume_source`,`resume_error`) and failure keys (`error_code`,`error_retryable`) stay first-class.
-- tool evidence linkage (hash/ref/path) must be inspectable in one click path.
-- Error UX must show violated invariant + next repair command (`doctor`,`trace:validate`,`db:check`,`vm:cleanup:audit`,`ship:core`).
-- New UI features require deterministic replay fixtures plus >=1 headless assertion tied to contract rows/events.
+- UI is an operator console, not marketing: terse copy, explicit status, zero decorative ambiguity.
+- Backend contracts are SoT: `runs`,`events`,`tool_calls`,`artifacts`,`scores`,`judge_runs`,`eval_runs`,`promotions`,`refine_runs`,`suggest_runs`,`trace`.
+- State split is hard: server snapshots keyed by IDs; UI state for controls only; derived state via pure selectors only.
+- Render canon: UTC timestamps; raw IDs/enums visible; no lossy prettification of contract keys.
+- Failure keys stay first-class: `error_code`,`error_retryable`,`resume_mode`,`resume_source`,`resume_error`.
+- Tool/skill evidence must be inspectable by stable hash+ref+path links in one click path.
+- Error panels must show violated invariant + exact repair command (`doctor`,`trace:validate`,`db:check`,`vm:cleanup:audit`,`ship:core`,`ship:skills`).
+- New UI features require deterministic fixtures + at least one headless assertion bound to contract rows/events.

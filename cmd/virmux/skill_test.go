@@ -758,7 +758,6 @@ func TestCmdSkillRunRejectsPathEscapeName(t *testing.T) {
 }
 
 func TestCmdSkillRunAcceptsRepoRelativeFixturePath(t *testing.T) {
-	t.Parallel()
 	tmp := t.TempDir()
 	skillDir := filepath.Join(tmp, "skills", "dd")
 	if err := os.MkdirAll(filepath.Join(skillDir, "tests"), 0o755); err != nil {

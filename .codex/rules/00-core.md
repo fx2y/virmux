@@ -3,15 +3,15 @@ paths:
   - "**/*"
 ---
 # Core Rules
-- Prefer contract-complete edits over partial fixes.
-- Prefer canonical `mise` lanes over ad-hoc command chains.
-- Determinism is mandatory: ban hidden env deps, mutable-in-place artifacts, unstable schemas.
-- Fail closed, fail legibly: every hard error must name violated invariant + fix action.
-- Machine-first outputs only: stable SQL/JSON fields, UTC timestamps, reproducible paths, parseable logs.
-- Keep I/O at edges; keep core logic pure/injectable/testable.
-- Inject unstable deps (`clock`,`id`,`runner`,`process`,`sleep`,`timeout`); no globals/singletons.
-- Retries/timeouts must be explicit, bounded, typed (retryable vs non-retryable), and test-covered.
-- Serialize deterministically (sorted inputs, canonical delimiters, fixed metadata where required).
-- Schema/data evolution is additive; do not silently drop/rename contract keys.
-- Diffs in harness-critical paths must stay surgical; no opportunistic refactor.
-- New recurring failure class must ship with executable guard + learning capture in same diff.
+- Contract-complete edits only; partial fixes are regressions deferred.
+- Determinism is non-negotiable: no hidden env deps, no in-place mutation of canonical artifacts, no unstable schema behavior.
+- Fail closed + fail legibly: every hard error names invariant + operator fix action.
+- Evidence-first outputs: stable SQL/JSON keys, UTC timestamps, parseable logs, reproducible refs.
+- Keep I/O at boundaries; keep core pure/injectable/testable.
+- Inject unstable deps (`clock`,`id`,`runner`,`process`,`sleep`,`timeout`,`probe`); globals/singletons banned.
+- Retries/timeouts are explicit, bounded, typed, and test-covered.
+- Serialization/hashing is canonical (sorted inputs, normalized paths, fixed metadata).
+- Validators must not mutate evidence (`db:check`-style rewrite is forbidden).
+- Schema evolution is additive only; never silently remove/repurpose contract fields.
+- Harness-critical diffs stay surgical; opportunistic refactor is a contract breach.
+- Every new recurring failure class ships same-diff with 1 executable guard + 1 learning capture.
