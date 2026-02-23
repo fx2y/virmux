@@ -29,6 +29,14 @@ rg -n -F "virmux skill <lint|run|judge|ab|refine|suggest|promote|replay>" spec-0
   echo "skill:docs-drift: missing command canon anchor in spec-0/04-htn.jsonl" >&2
   exit 1
 }
+rg -n -F "\"cmd_canon\":\"virmux skill <lint|run|judge|ab|refine|suggest|promote|replay>\"" spec-0/05/cli-map.jsonl >/dev/null || {
+  echo "skill:docs-drift: missing spec-05 cli canon map anchor" >&2
+  exit 1
+}
+rg -n -F "\"id\":\"map.cli.ghostfleet->virmux\"" spec-0/05/cli-map.jsonl >/dev/null || {
+  echo "skill:docs-drift: missing spec-05 translation map id" >&2
+  exit 1
+}
 rg -n "trace\\.ndjson" AGENTS.md >/dev/null || {
   echo "skill:docs-drift: missing trace.ndjson canon in AGENTS.md" >&2
   exit 1
