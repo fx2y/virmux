@@ -15,9 +15,10 @@ import (
 	"time"
 
 	"github.com/haris/virmux/internal/agent"
-	skillpkg "github.com/haris/virmux/internal/skill"
-	skilleval "github.com/haris/virmux/internal/skill/eval"
+	"github.com/haris/virmux/internal/skill/absvc"
 	skilljudge "github.com/haris/virmux/internal/skill/judge"
+	"github.com/haris/virmux/internal/skill/judgeflow"
+	"github.com/haris/virmux/internal/skill/promosvc"
 	skillrun "github.com/haris/virmux/internal/skill/run"
 	skillspec "github.com/haris/virmux/internal/skill/spec"
 	"github.com/haris/virmux/internal/store"
@@ -243,7 +244,7 @@ func cmdSkillJudgeWithEmitter(args []string, emitEvent skillEventEmitter) error 
 		return errors.New("run id cannot be empty")
 	}
 	runDir := filepath.Join(*runsDir, runID)
-	meta, err := readSkillRunMeta(runDir)
+	meta, err := judgeflow.ReadRunMeta(runDir)
 	if err != nil {
 		return err
 	}
@@ -277,84 +278,33 @@ func cmdSkillJudgeWithEmitter(args []string, emitEvent skillEventEmitter) error 
 	defer tw.Close()
 
 	ctx := context.Background()
-	if err := emitEvent(ctx, st, tw, runID, task, "skill.judge.started", map[string]any{
-		"skill":       skillName,
-		"rubric":      filepath.ToSlash(rubric),
-		"rubric_hash": rubricHash,
-	}, time.Now); err != nil {
-		return err
+	svc := judgeflow.Service{
+		Emit: func(ctx context.Context, event string, payload map[string]any) error {
+			return emitEvent(ctx, st, tw, runID, task, event, payload, time.Now)
+		},
+		PersistArtifacts: func(ctx context.Context, runID string, paths []string) error {
+			return persistRunArtifacts(ctx, st, runID, paths)
+		},
+		InsertScore:    st.InsertScore,
+		InsertJudgeRun: st.InsertJudgeRun,
+		Now:            time.Now,
 	}
-	res, err := skilljudge.Evaluate(r, rubricHash, skilljudge.Evidence{
-		RunID:       runID,
-		Skill:       skillName,
-		RunDir:      runDir,
-		RunStatus:   status,
-		ToolCalls:   meta.ToolCalls,
-		ExpectFiles: meta.ExpectFiles,
+	runRes, err := svc.Run(ctx, judgeflow.Input{
+		RunID:      runID,
+		RunDir:     runDir,
+		RunTask:    task,
+		RunStatus:  status,
+		Skill:      skillName,
+		RubricPath: rubric,
+		RubricHash: rubricHash,
+		Rubric:     r,
+		ToolCalls:  meta.ToolCalls,
+		ExpectFile: meta.ExpectFiles,
 	})
 	if err != nil {
 		return err
 	}
-	scorePath, err := skillrun.EnsureScorePlaceholder(runDir, map[string]any{
-		"run_id":         res.RunID,
-		"skill":          res.Skill,
-		"score":          res.Score,
-		"pass":           res.Pass,
-		"critique":       res.Critique,
-		"criterion":      res.Criterion,
-		"rubric_hash":    res.RubricHash,
-		"judge_cfg_hash": res.JudgeCfgHash,
-		"artifact_hash":  res.ArtifactHash,
-	})
-	if err != nil {
-		return err
-	}
-	metricsJSON, _ := json.Marshal(criteriaMap(res.Criterion))
-	critiqueJSON, _ := json.Marshal(res.Critique)
-	now := time.Now().UTC()
-	if err := st.InsertScore(ctx, store.Score{
-		RunID:        runID,
-		Skill:        skillName,
-		Score:        res.Score,
-		Pass:         res.Pass,
-		Critique:     string(critiqueJSON),
-		JudgeCfgHash: res.JudgeCfgHash,
-		ArtifactHash: res.ArtifactHash,
-		CreatedAt:    now,
-	}); err != nil {
-		return err
-	}
-	if err := st.InsertJudgeRun(ctx, store.JudgeRun{
-		RunID:        runID,
-		Skill:        skillName,
-		RubricHash:   res.RubricHash,
-		JudgeCfgHash: res.JudgeCfgHash,
-		ArtifactHash: res.ArtifactHash,
-		MetricsJSON:  string(metricsJSON),
-		Critique:     string(critiqueJSON),
-		Score:        res.Score,
-		Pass:         res.Pass,
-		CreatedAt:    now,
-	}); err != nil {
-		return err
-	}
-	if err := emitEvent(ctx, st, tw, runID, task, "skill.judge.scored", map[string]any{
-		"skill":          skillName,
-		"score":          res.Score,
-		"pass":           res.Pass,
-		"critique":       res.Critique,
-		"criterion":      res.Criterion,
-		"score_path":     filepath.ToSlash(filepath.Base(scorePath)),
-		"rubric_hash":    res.RubricHash,
-		"judge_cfg_hash": res.JudgeCfgHash,
-		"artifact_hash":  res.ArtifactHash,
-	}, time.Now); err != nil {
-		return err
-	}
-	if err := persistRunArtifacts(ctx, st, runID, []string{scorePath}); err != nil {
-		return err
-	}
-	b, _ := json.Marshal(res)
+	b, _ := json.Marshal(runRes.Judge)
 	fmt.Println(string(b))
 	return nil
 }
@@ -776,201 +726,54 @@ func cmdSkillAB(args []string) error {
 		return err
 	}
 	defer st.Close()
-	cohortLabel := strings.TrimSpace(*cohort)
-	if cohortLabel == "" {
-		cohortLabel = "qa-skill-c3-" + time.Now().UTC().Format("20060102")
-	}
-	ex := skilleval.OSExec{}
-	ctx := context.Background()
-	headSnap, err := skilleval.LoadSkillSnapshot(ctx, ex, *repoDir, *skillsDir, skillName, headRef)
-	if err != nil {
-		return err
-	}
-	baseSnap, err := skilleval.LoadSkillSnapshot(ctx, ex, *repoDir, *skillsDir, skillName, baseRef)
-	if err != nil {
-		return err
-	}
-	if err := skilleval.ValidateFrozenFixtureSet(headSnap.Fixtures, baseSnap.Fixtures); err != nil {
-		return fmt.Errorf("frozen fixture set violation: %w", err)
-	}
-	baseSnapFrozen := baseSnap
-	baseSnapFrozen.Fixtures = append([]skilleval.Fixture(nil), headSnap.Fixtures...)
-	evalID := fmt.Sprintf("%d-skillab", time.Now().UTC().UnixNano())
-	evalDir := filepath.Join(*runsDir, evalID)
-	if err := os.MkdirAll(evalDir, 0o755); err != nil {
-		return err
-	}
-	baseCfgPath := filepath.Join(evalDir, "promptfoo.base.json")
-	headCfgPath := filepath.Join(evalDir, "promptfoo.head.json")
-	baseCfg, err := skilleval.BuildPromptfooConfig(baseSnapFrozen, *provider)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(baseCfgPath, baseCfg, 0o644); err != nil {
-		return err
-	}
-	headCfg, err := skilleval.BuildPromptfooConfig(headSnap, *provider)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(headCfgPath, headCfg, 0o644); err != nil {
-		return err
-	}
-	baseResPath := filepath.Join(evalDir, "promptfoo.base.results.json")
-	headResPath := filepath.Join(evalDir, "promptfoo.head.results.json")
-	timeout := time.Duration(*timeoutSec) * time.Second
-	if err := skilleval.RunPromptfoo(ctx, ex, *repoDir, *promptfooBin, baseCfgPath, baseResPath, timeout); err != nil {
-		return err
-	}
-	if err := skilleval.RunPromptfoo(ctx, ex, *repoDir, *promptfooBin, headCfgPath, headResPath, timeout); err != nil {
-		return err
-	}
-	baseRaw, err := os.ReadFile(baseResPath)
-	if err != nil {
-		return err
-	}
-	headRaw, err := os.ReadFile(headResPath)
-	if err != nil {
-		return err
-	}
-	cfgBundlePath := filepath.Join(evalDir, "promptfoo.cfg.bundle.json")
-	cfgBundle, _ := json.MarshalIndent(map[string]any{
-		"base_cfg_path": filepath.ToSlash(filepath.Join(evalID, "promptfoo.base.json")),
-		"head_cfg_path": filepath.ToSlash(filepath.Join(evalID, "promptfoo.head.json")),
-		"base":          json.RawMessage(baseCfg),
-		"head":          json.RawMessage(headCfg),
-	}, "", "  ")
-	cfgBundleBytes := append(cfgBundle, '\n')
-	if err := os.WriteFile(cfgBundlePath, cfgBundleBytes, 0o644); err != nil {
-		return err
-	}
-	resultsBundlePath := filepath.Join(evalDir, "promptfoo.results.bundle.json")
-	resultsBundle, _ := json.MarshalIndent(map[string]any{
-		"base_results_path": filepath.ToSlash(filepath.Join(evalID, "promptfoo.base.results.json")),
-		"head_results_path": filepath.ToSlash(filepath.Join(evalID, "promptfoo.head.results.json")),
-		"base":              json.RawMessage(baseRaw),
-		"head":              json.RawMessage(headRaw),
-	}, "", "  ")
-	resultsBundleBytes := append(resultsBundle, '\n')
-	if err := os.WriteFile(resultsBundlePath, resultsBundleBytes, 0o644); err != nil {
-		return err
-	}
-	ids := make([]string, 0, len(headSnap.Fixtures))
-	for _, fx := range headSnap.Fixtures {
-		ids = append(ids, fx.ID)
-	}
-	baseMetrics, baseCases, err := skilleval.ParsePromptfooResults(baseRaw, ids)
-	if err != nil {
-		return err
-	}
-	headMetrics, headCases, err := skilleval.ParsePromptfooResults(headRaw, ids)
-	if err != nil {
-		return err
-	}
-	var maxCost *float64
-	if *costGate {
-		maxCost = costMax
-	}
-	verdict := skilleval.CompareAB(baseMetrics, headMetrics, skilleval.ABThresholds{
-		MinScoreDelta:    *scoreMin,
-		MaxFailRateDelta: *failMax,
-		MaxCostDelta:     maxCost,
+	res, err := absvc.Service{
+		Store: st,
+		Now:   time.Now,
+	}.Run(context.Background(), absvc.Input{
+		RepoDir:      *repoDir,
+		SkillsDir:    *skillsDir,
+		RunsDir:      *runsDir,
+		SkillName:    skillName,
+		BaseRef:      baseRef,
+		HeadRef:      headRef,
+		Provider:     *provider,
+		PromptfooBin: *promptfooBin,
+		Cohort:       strings.TrimSpace(*cohort),
+		ScoreMin:     *scoreMin,
+		FailMax:      *failMax,
+		CostMax:      *costMax,
+		CostGate:     *costGate,
+		TimeoutSec:   *timeoutSec,
 	})
-	verdictPath := filepath.Join(evalDir, "ab-verdict.json")
-	verdictDoc := map[string]any{
-		"id":      evalID,
-		"skill":   skillName,
-		"cohort":  cohortLabel,
-		"base":    map[string]any{"ref": baseRef, "metrics": baseMetrics},
-		"head":    map[string]any{"ref": headRef, "metrics": headMetrics},
-		"verdict": verdict,
-		"gates": map[string]any{
-			"score_delta_min":     *scoreMin,
-			"fail_rate_delta_max": *failMax,
-			"cost_delta_max":      maxCost,
-		},
-	}
-	vb, _ := json.MarshalIndent(verdictDoc, "", "  ")
-	verdictBytes := append(vb, '\n')
-	if err := os.WriteFile(verdictPath, verdictBytes, 0o644); err != nil {
+	if err != nil {
 		return err
-	}
-	cfgSum := sha256.Sum256(cfgBundleBytes)
-	resSum := sha256.Sum256(resultsBundleBytes)
-	verdictSum := sha256.Sum256(verdictBytes)
-	ctx = context.Background()
-	if err := st.InsertEvalRun(ctx, store.EvalRun{
-		ID:            evalID,
-		Skill:         skillName,
-		Cohort:        cohortLabel,
-		BaseRef:       baseRef,
-		HeadRef:       headRef,
-		Provider:      *provider,
-		FixturesHash:  skilleval.FixtureSetHash(headSnap.Fixtures),
-		CfgSHA256:     fmt.Sprintf("%x", cfgSum[:]),
-		CfgPath:       filepath.ToSlash(filepath.Join(evalID, "promptfoo.cfg.bundle.json")),
-		ResultsSHA256: fmt.Sprintf("%x", resSum[:]),
-		ResultsPath:   filepath.ToSlash(filepath.Join(evalID, "promptfoo.results.bundle.json")),
-		VerdictSHA256: fmt.Sprintf("%x", verdictSum[:]),
-		VerdictPath:   filepath.ToSlash(filepath.Join(evalID, "ab-verdict.json")),
-		ScoreP50Base:  baseMetrics.ScoreP50,
-		ScoreP50Head:  headMetrics.ScoreP50,
-		FailRateBase:  baseMetrics.FailRate,
-		FailRateHead:  headMetrics.FailRate,
-		CostTotalBase: baseMetrics.CostTotal,
-		CostTotalHead: headMetrics.CostTotal,
-		ScoreP50Delta: verdict.ScoreDelta,
-		FailRateDelta: verdict.FailRateDelta,
-		CostDelta:     verdict.CostDelta,
-		Pass:          verdict.Pass,
-		VerdictJSON:   string(vb),
-		CreatedAt:     time.Now().UTC(),
-	}); err != nil {
-		return err
-	}
-	for _, id := range ids {
-		bc := baseCases[id]
-		hc := headCases[id]
-		if err := st.InsertEvalCase(ctx, store.EvalCase{
-			EvalRunID: evalID,
-			FixtureID: id,
-			BaseScore: bc.Score,
-			HeadScore: hc.Score,
-			BasePass:  bc.Pass,
-			HeadPass:  hc.Pass,
-			BaseCost:  bc.Cost,
-			HeadCost:  hc.Cost,
-			CreatedAt: time.Now().UTC(),
-		}); err != nil {
-			return err
-		}
 	}
 	out := map[string]any{
-		"id":     evalID,
-		"skill":  skillName,
-		"cohort": cohortLabel,
-		"pass":   verdict.Pass,
-		"reason": verdict.Reason,
+		"id":     res.EvalID,
+		"skill":  res.Skill,
+		"cohort": res.Cohort,
+		"pass":   res.Pass,
+		"reason": res.Reason,
 		"artifacts": map[string]any{
-			"eval_dir":     filepath.ToSlash(evalDir),
-			"verdict_path": filepath.ToSlash(verdictPath),
+			"eval_dir":     res.EvalDir,
+			"verdict_path": res.VerdictPath,
 		},
 		"deltas": map[string]any{
-			"score_p50_delta": verdict.ScoreDelta,
-			"fail_rate_delta": verdict.FailRateDelta,
-			"cost_delta":      verdict.CostDelta,
-			"base_ref":        baseRef,
-			"head_ref":        headRef,
-			"base_score_p50":  baseMetrics.ScoreP50,
-			"head_score_p50":  headMetrics.ScoreP50,
-			"base_fail_rate":  baseMetrics.FailRate,
-			"head_fail_rate":  headMetrics.FailRate,
+			"score_p50_delta": res.ScoreDelta,
+			"fail_rate_delta": res.FailDelta,
+			"cost_delta":      res.CostDelta,
+			"base_ref":        res.BaseRef,
+			"head_ref":        res.HeadRef,
+			"base_score_p50":  res.BaseScore,
+			"head_score_p50":  res.HeadScore,
+			"base_fail_rate":  res.BaseFail,
+			"head_fail_rate":  res.HeadFail,
 		},
 	}
 	ob, _ := json.Marshal(out)
 	fmt.Println(string(ob))
-	if !verdict.Pass {
-		return fmt.Errorf("AB_REGRESSION: %s", verdict.Reason)
+	if !res.Pass {
+		return fmt.Errorf("AB_REGRESSION: %s", res.Reason)
 	}
 	return nil
 }
@@ -990,66 +793,34 @@ func cmdSkillPromote(args []string) error {
 	}
 	skillName := strings.TrimSpace(fs.Args()[0])
 	evalID := strings.TrimSpace(fs.Args()[1])
-	if skillName == "" || evalID == "" {
-		return errors.New("skill and eval-run-id are required")
-	}
 	st, err := store.Open(*dbPath)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
-	row, err := st.GetEvalRun(context.Background(), evalID)
+	res, err := promosvc.Service{
+		Store: st,
+		Now:   time.Now,
+		User:  os.Getenv,
+	}.Run(context.Background(), promosvc.Input{
+		SkillName:   skillName,
+		EvalRunID:   evalID,
+		RepoDir:     *repoDir,
+		Tag:         *tag,
+		Actor:       *actor,
+		MaxAgeHours: *maxAgeH,
+	})
 	if err != nil {
-		return fmt.Errorf("MISSING_AB_VERDICT: %w", err)
-	}
-	if row.Skill != skillName {
-		return fmt.Errorf("MISSING_AB_VERDICT: eval run skill=%s does not match %s", row.Skill, skillName)
-	}
-	if !row.Pass {
-		return fmt.Errorf("MISSING_AB_VERDICT: eval run %s is not passing", evalID)
-	}
-	maxAge := time.Duration(*maxAgeH) * time.Hour
-	if maxAge > 0 && !row.CreatedAt.IsZero() && time.Since(row.CreatedAt) > maxAge {
-		return fmt.Errorf("STALE_AB_VERDICT: eval run %s older than %s", evalID, maxAge)
-	}
-	promoTag := strings.TrimSpace(*tag)
-	if promoTag == "" {
-		promoTag = fmt.Sprintf("skill/%s/prod", skillName)
-	}
-	promoActor := strings.TrimSpace(*actor)
-	if promoActor == "" {
-		promoActor = strings.TrimSpace(os.Getenv("USER"))
-	}
-	ex := skilleval.OSExec{}
-	if _, err := ex.Run(context.Background(), skillpkg.Command{
-		Dir:  *repoDir,
-		Name: "git",
-		Args: []string{"tag", "-f", promoTag, row.HeadRef},
-	}); err != nil {
-		return fmt.Errorf("move promotion tag: %w", err)
-	}
-	promoID := fmt.Sprintf("%d-promote", time.Now().UTC().UnixNano())
-	if err := st.InsertPromotion(context.Background(), store.Promotion{
-		ID:            promoID,
-		Skill:         skillName,
-		Tag:           promoTag,
-		BaseRef:       row.BaseRef,
-		HeadRef:       row.HeadRef,
-		EvalRunID:     row.ID,
-		VerdictSHA256: row.VerdictSHA256,
-		Actor:         promoActor,
-		CreatedAt:     time.Now().UTC(),
-	}); err != nil {
 		return err
 	}
 	out := map[string]any{
-		"id":          promoID,
-		"skill":       skillName,
-		"tag":         promoTag,
-		"eval_run_id": row.ID,
-		"base_ref":    row.BaseRef,
-		"head_ref":    row.HeadRef,
-		"actor":       promoActor,
+		"id":          res.ID,
+		"skill":       res.Skill,
+		"tag":         res.Tag,
+		"eval_run_id": res.EvalRunID,
+		"base_ref":    res.BaseRef,
+		"head_ref":    res.HeadRef,
+		"actor":       res.Actor,
 	}
 	b, _ := json.Marshal(out)
 	fmt.Println(string(b))
