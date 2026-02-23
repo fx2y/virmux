@@ -1,0 +1,9 @@
+criteria:
+  - id: format
+    w: 0.4
+    must: true
+  - id: completeness
+    w: 0.4
+  - id: actionability
+    w: 0.2
+pass: 0.8
