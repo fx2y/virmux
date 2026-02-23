@@ -2,7 +2,7 @@
 
 ## Skill scaffold
 ```bash
-ghostfleet skill suggest --from-runs "r123,r124,r130" --name vendor-dd
+virmux skill suggest --run-ids "r123,r124,r130" --name vendor-dd
 ```
 
 ## Experiment config

@@ -2,11 +2,11 @@
 
 ## 1) Due-diligence skill compounding
 ```bash
-rid=$(ghostfleet skill run dd --input cases/acme.md --json | jq -r .run_id)
-ghostfleet judge run "$rid"
-ghostfleet skill refine suggest "$rid" > /tmp/patch.diff
-ghostfleet ab run experiments/dd-candidate-vs-main.yaml
-ghostfleet promote skill@candidate-sha
+rid=$(virmux skill run dd --fixture skills/dd/tests/case01.json | jq -r .id)
+virmux skill judge "$rid"
+virmux skill refine "$rid"
+virmux skill ab dd HEAD~1..HEAD
+virmux skill promote dd <eval_run_id>
 ```
 Expected:
 - `runs/<rid>/trace.ndjson` valid (compat `trace.jsonl` symlink may exist)

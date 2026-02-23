@@ -41,7 +41,7 @@ operator(cli/tui)
     -> mcp gateway(client+server)
 
 repo/
-  skills/<name>/{prompt.md,tools.yaml,rubric.yaml,tests/*}
+  skills/<name>/{SKILL.md,tools.yaml,rubric.yaml,tests/*}
   roles/<role>.yaml
   runs/<run_id>/{trace.ndjson,stdout,artifacts/*}
   agents/<id>.json
@@ -80,7 +80,7 @@ Rules: FK on; WAL on; append-only events/tool_calls; run state monotonic.
 Dir contract:
 ```text
 skills/dd/
-  prompt.md      # behavior
+  SKILL.md       # behavior (prompt.md compat import/export shim only)
   tools.yaml     # allowlist + budgets/timeouts
   rubric.yaml    # weighted criteria + thresholds
   tests/         # fixtures + expected properties
@@ -139,11 +139,11 @@ ghostfleet vm run --cmd 'uname -a && echo ok'
 ```
 ### B. “Skill loop”
 ```bash
-ghostfleet skill run dd --input case.md
-ghostfleet judge run <run_id>
-ghostfleet skill refine suggest <run_id>
-ghostfleet ab run exp.yaml
-ghostfleet promote skill@<sha>
+virmux skill run dd --fixture skills/dd/tests/case01.json
+virmux skill judge <run_id>
+virmux skill refine <run_id>
+virmux skill ab dd HEAD~1..HEAD
+virmux skill promote dd <eval_run_id>
 ```
 ### C. “Ghost deploy”
 ```bash

@@ -296,11 +296,17 @@ run = "./scripts/skill_test_c5.sh"
 sources = ["scripts/skill_test_c5.sh", "cmd/**/*.go", "internal/**/*.go", "skills/**/*.md", "skills/**/*.yaml", "skills/**/*.json"]
 outputs = ["tmp/skill-test-c5.ok"]
 
+[tasks."skill:test:c6"]
+description = "Focused C6 hardening+cert guards"
+run = "./scripts/skill_test_c6.sh"
+sources = ["scripts/skill_test_c6.sh", "scripts/skill_docs_drift.sh", "mise.toml", "docs/**/*.md", "AGENTS.md", "spec-0/04-htn.jsonl"]
+outputs = ["tmp/skill-test-c6.ok", "tmp/skill-docs-drift.ok"]
+
 [tasks."skill:test"]
-description = "Combined C1..C4 skill guard lane"
-depends = ["skill:test:core", "skill:test:c2", "skill:test:c3", "skill:test:c4", "skill:test:c5"]
+description = "Combined C1..C6 skill guard lane"
+depends = ["skill:test:core", "skill:test:c2", "skill:test:c3", "skill:test:c4", "skill:test:c5", "skill:test:c6"]
 run = "mkdir -p tmp && date -u +%FT%TZ > tmp/skill-test.ok"
-sources = ["scripts/skill_test_core.sh", "scripts/skill_test_c2.sh", "scripts/skill_test_c3.sh", "scripts/skill_test_c4.sh", "scripts/skill_test_c5.sh", "cmd/**/*.go", "internal/**/*.go", "skills/**/*.md", "skills/**/*.yaml", "skills/**/*.json"]
+sources = ["scripts/skill_test_core.sh", "scripts/skill_test_c2.sh", "scripts/skill_test_c3.sh", "scripts/skill_test_c4.sh", "scripts/skill_test_c5.sh", "scripts/skill_test_c6.sh", "scripts/skill_docs_drift.sh", "cmd/**/*.go", "internal/**/*.go", "skills/**/*.md", "skills/**/*.yaml", "skills/**/*.json", "docs/**/*.md", "AGENTS.md", "spec-0/04-htn.jsonl", "mise.toml"]
 outputs = ["tmp/skill-test.ok"]
 
 [tasks."skill:eval"]
@@ -325,8 +331,8 @@ outputs = ["tmp/skill-sql-cert.ok", "tmp/skill-sql-cert-summary.json"]
 [tasks."ship:skills"]
 description = "Uncached skill lane certification (isolated from ship:core)"
 run = "./scripts/ship_skills.sh"
-sources = ["scripts/ship_skills.sh", "scripts/skill_eval.sh", "scripts/skill_ab.sh", "scripts/skill_sql_cert.sh", "scripts/skill_test_core.sh", "scripts/skill_test_c2.sh", "scripts/skill_test_c3.sh", "scripts/skill_test_c4.sh", "scripts/skill_test_c5.sh", "cmd/**/*.go", "internal/**/*.go", "skills/**/*.md", "skills/**/*.yaml", "skills/**/*.json", "package.json", "package-lock.json"]
-outputs = ["tmp/ship-skills-summary.json", "tmp/skill-sql-cert.ok"]
+sources = ["scripts/ship_skills.sh", "scripts/cleanup_audit.sh", "scripts/skill_docs_drift.sh", "scripts/skill_eval.sh", "scripts/skill_ab.sh", "scripts/skill_sql_cert.sh", "scripts/skill_test_core.sh", "scripts/skill_test_c2.sh", "scripts/skill_test_c3.sh", "scripts/skill_test_c4.sh", "scripts/skill_test_c5.sh", "scripts/skill_test_c6.sh", "cmd/**/*.go", "internal/**/*.go", "skills/**/*.md", "skills/**/*.yaml", "skills/**/*.json", "docs/**/*.md", "AGENTS.md", "spec-0/04-htn.jsonl", "package.json", "package-lock.json", "mise.toml"]
+outputs = ["tmp/ship-skills-summary.json", "tmp/skill-sql-cert.ok", "tmp/cleanup-audit.ok", "tmp/skill-test-c6.ok", "tmp/skill-docs-drift.ok"]
 
 [tasks.fmt]
 description = "Format Go and JS"
