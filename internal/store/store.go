@@ -92,11 +92,14 @@ type EvalRun struct {
 	VerdictPath   string
 	ScoreP50Base  float64
 	ScoreP50Head  float64
+	ScoreP90Base  float64
+	ScoreP90Head  float64
 	FailRateBase  float64
 	FailRateHead  float64
 	CostTotalBase float64
 	CostTotalHead float64
 	ScoreP50Delta float64
+	ScoreP90Delta float64
 	FailRateDelta float64
 	CostDelta     float64
 	Pass          bool

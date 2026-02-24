@@ -3,43 +3,33 @@ paths:
   - "cmd/**/*.go"
   - "internal/**/*.go"
 ---
-# Go Runtime Rules
-- `cmd/*` is flags/DI/wiring only; behavior lives in `internal/*`.
-- Behavior edits require success+failure tests in `*_test.go`.
-- Errors wrap op context and preserve typed root cause.
-- Long paths accept `context.Context`; no unbounded waits, no goroutine leaks.
-- VM lifecycle is host-owned; guest self-exit is never sole completion truth.
-- VM boundary events are mandatory: `vm.boot.started`,`vm.exec.injected`,`vm.exit.observed`.
-- Serial exec parsing is marker-segment bounded (`__virmux_exec_start__`,`__virmux_exec_rc__`); no raw tty substring trust.
-- Smoke markers `Linux`+`ok` are required for smoke bridge only; vsock-first lanes must not depend on tty markers.
-- Vsock dial uses shared transport only (`internal/transport/vsock`); command-local dialers banned.
-- CONNECT ack accept is `OK ` prefix; non-OK ack is non-retryable `ErrConnectAck`.
-- Retry budget applies only to early stream faults; exhaustion returns typed retry error.
-- READY parser is strict (`READY v0 tools=`); capability list must be parsed, never free-text trusted.
-- `run.finished` non-null contract keys: `lost_logs`,`lost_metrics`,`guest_ready_ms`,`connect_attempts`,`handshake_ms`,`error_obj{code,msg,retryable}`.
-- Host error classes are stable: `TIMEOUT`,`DENIED`,`DISCONNECT`,`CRASH`,`INTERNAL`.
-- Resume precedence: explicit mem/state > `agent.last_snapshot_id` > `latest.json`.
-- Snapshot restore uses SDK snapshot path (`WithSnapshot(...)`) and attempts once.
-- Any resume resolve/load/wait fault enforces `StopVMM+Wait` then cold fallback.
-- Every `vm:resume` terminal event includes non-null `resume_mode`,`resume_source`,`resume_error`.
-- Resume wait logic stays seam-injected/testable (`start/stop/wait/sleep/process probes`).
-- SoT state is `agents/<id>.json`; mutable disk is `volumes/<agent>.ext4`; rootfs stays RO (`rootflags=noload`).
-- `runs`/`events`/`tool_calls`/`artifacts` schemas evolve additively only.
-- Artifact inventory is sqlite-first: regular file => content hash; non-regular => `meta:*` row via `lstat`, `bytes=0`.
-- Trace is append-only (`O_APPEND|O_CREATE|O_WRONLY`) and per-event order is fixed `trace emit -> sqlite insert`.
-- SQLite invariants are hard (`WAL`,`FK`,`required indexes`); checks are validator-only.
-- Export/import is deterministic+safe: canonical ordering/mtime/uid/gid, manifest verified pre-insert, path+symlink escape denied.
-- Skill canon: `SKILL.md` SoT; `prompt.md` compat shim only.
-- Skill CLI canon: `virmux skill <lint|run|judge|ab|refine|suggest|promote|replay>`.
-- Skill arg safety: name is strict kebab token; escapes hard-fail typed `SKILL_PATH_ESCAPE`.
-- Skill SHA is path-invariant hash of required rel files `SKILL.md|tools.yaml|rubric.yaml`.
-- Fixture resolve order is deterministic `raw -> skill/raw -> skill/tests/raw`.
-- Tool policy parser is strict integer-only for budget keys (`tool_calls`,`seconds`,`tokens`).
-- `skill run` policy deny (`TOOL_DENIED`,`BUDGET_EXCEEDED`) fails closed with required evidence persisted.
-- `skill judge` must abort before scoring inserts if `skill.judge.started` emit fails.
-- Replay parity checks ordered tool input+output hashes and sqlite artifact inventory parity.
-- AB freeze rule: both refs evaluate on head fixture payload set; base missing fixture id is hard fail.
-- AB cfg/results hash/path must match exact persisted bundle bytes.
-- Refine default eval selection is latest passing AB row (not latest by time).
-- Refine/suggest persisted refs must be run-relative/repo-relative; absolute host paths forbidden.
-- Suggest mining must use run-evidence fingerprints, latest score per run, normalized run-scoped refs, and base-head branch re-anchoring per candidate.
+# Go VM/Store/Trace Rules
+- `cmd/*` is parse/DI/dispatch/print only; behavior belongs in `internal/*`.
+- Behavior edits require success+failure tests; errors keep typed root + op context.
+- Long paths require `context.Context`; no unbounded waits or goroutine leaks.
+
+- VM truth is host-owned: require `vm.boot.started`,`vm.exec.injected`,`vm.exit.observed`; keep `vm.guest.ready` vs `vm.agent.ready` split.
+- Serial `Linux+ok` markers are bridge-only; vsock lanes must be tty-agnostic.
+- Resume contract: precedence `explicit > last_snapshot_id > latest.json`; attempt once; fault => `StopVMM+Wait` then cold fallback; terminal `vm:resume` always includes non-null `resume_mode,resume_source,resume_error`.
+
+- Transport contract: shared vsock dialer only (`internal/transport/vsock`), no cmd-local dialers; CONNECT ack accept=`OK ` prefix; non-OK is non-retryable; retry budget only for early stream faults; READY parser strict `READY v0 tools=`.
+- Terminal keys non-null/stable: `lost_*`,`guest_ready_ms`,`connect_attempts`,`handshake_ms`,`error_obj{code,msg,retryable}`,`resume_*`.
+- Stable host error API: `TIMEOUT`,`DENIED`,`DISCONNECT`,`CRASH`,`INTERNAL`,`JUDGE_INVALID`.
+
+- State/trace/db contract: SoT `agents/<id>.json`; mutable disk `volumes/<agent>.ext4`; rootfs RO; trace append-only and ordered `trace emit -> sqlite insert`; sqlite hard invariants `WAL+FK+required indexes`; checker paths are validator-only.
+- Artifact/export contract: sqlite inventory is SoT (regular=content hash; non-regular=`meta:*`,`bytes=0`,`lstat`); export/import deterministic+safe (canonical order/mtime/uid/gid, manifest pre-verify, symlink/path escape deny).
+
+- Skill hard rules in Go paths:
+- `SKILL.md` SoT (`prompt.md` compat only); CLI surface fixed.
+- Skill arg strict kebab token; escapes => `SKILL_PATH_ESCAPE`.
+- Fingerprint hashes canonical rel-path+bytes of `SKILL.md|tools.yaml|rubric.yaml`.
+- Fixture lookup deterministic `raw -> skill/raw -> skill/tests/raw`.
+- Budget parser integer-only (`tool_calls`,`seconds`,`tokens`).
+- `skill run` denies (`TOOL_DENIED`,`BUDGET_EXCEEDED`) fail closed and preserve required evidence.
+- Judge is rule-first; started-emit failure forbids score/judge_run writes; malformed/unknown output/mode => typed `JUDGE_INVALID` before writes.
+- Replay parity checks ordered tool input+output hashes + sqlite artifact parity; nondet only via declared fixture flag.
+- AB pairwise evidence must join via `experiments.eval_run_id`; tie only dual hard-fail.
+- Promote/rollback resolve refs (`git rev-parse`) before audit writes; `commit_sha` immutable SHA.
+- Refine/suggest persisted refs must be run-relative/repo-relative; suggest branches re-anchor to captured base HEAD.
+
+- Determinism guard: no test may combine `t.Parallel` + `os.Chdir`.

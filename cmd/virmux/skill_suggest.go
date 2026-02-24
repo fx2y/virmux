@@ -214,7 +214,7 @@ ORDER BY ranked.created_at,ranked.run_id`)
 		if err != nil {
 			return nil, err
 		}
-		meta, _ := readSkillRunMeta(filepath.Join(runsDir, runID))
+		meta, _ := skillrun.ReadMeta(filepath.Join(runsDir, runID))
 		promptFP := strings.TrimSpace(meta.PromptFingerprint)
 		baseFP := strings.TrimSpace(meta.SkillBaseFingerprint)
 		if baseFP == "" {

@@ -23,7 +23,7 @@ type RuleResult struct {
 
 type Rule interface {
 	ID() string
-	Evaluate(ctx context.Context, e *Engine, ev judge.Evidence, meta skillRunMeta) (RuleResult, error)
+	Evaluate(ctx context.Context, e *Engine, ev judge.Evidence, meta run.Meta) (RuleResult, error)
 }
 
 type Engine struct {
@@ -39,7 +39,7 @@ func (e *Engine) Evaluate(ctx context.Context, ev judge.Evidence) ([]RuleResult,
 		return nil, errors.New("rule engine requires run dir/id")
 	}
 
-	meta, err := readSkillRunMeta(ev.RunDir)
+	meta, err := run.ReadMeta(ev.RunDir)
 	if err != nil {
 		return nil, fmt.Errorf("rule_meta: %w", err)
 	}
@@ -66,7 +66,7 @@ func (e *Engine) Evaluate(ctx context.Context, ev judge.Evidence) ([]RuleResult,
 type ReplayRule struct{}
 
 func (r *ReplayRule) ID() string { return "rule_replay" }
-func (r *ReplayRule) Evaluate(ctx context.Context, e *Engine, ev judge.Evidence, _ skillRunMeta) (RuleResult, error) {
+func (r *ReplayRule) Evaluate(ctx context.Context, e *Engine, ev judge.Evidence, _ run.Meta) (RuleResult, error) {
 	replayRes, err := run.VerifyReplayHashes(e.DBPath, ev.RunDir, ev.RunID)
 	if err != nil {
 		msg := err.Error()
@@ -91,7 +91,7 @@ func (r *ReplayRule) Evaluate(ctx context.Context, e *Engine, ev judge.Evidence,
 type BudgetToolCallsRule struct{}
 
 func (r *BudgetToolCallsRule) ID() string { return "rule_budget_tool_calls" }
-func (r *BudgetToolCallsRule) Evaluate(_ context.Context, _ *Engine, ev judge.Evidence, meta skillRunMeta) (RuleResult, error) {
+func (r *BudgetToolCallsRule) Evaluate(_ context.Context, _ *Engine, ev judge.Evidence, meta run.Meta) (RuleResult, error) {
 	if meta.Budget.ToolCalls <= 0 {
 		return RuleResult{ID: r.ID(), Value: 1.0, Pass: true}, nil
 	}
@@ -111,7 +111,7 @@ func (r *BudgetToolCallsRule) Evaluate(_ context.Context, _ *Engine, ev judge.Ev
 type JSONSchemaRule struct{}
 
 func (r *JSONSchemaRule) ID() string { return "rule_json_schema" }
-func (r *JSONSchemaRule) Evaluate(_ context.Context, _ *Engine, ev judge.Evidence, meta skillRunMeta) (RuleResult, error) {
+func (r *JSONSchemaRule) Evaluate(_ context.Context, _ *Engine, ev judge.Evidence, meta run.Meta) (RuleResult, error) {
 	schema, ok := meta.Expect["json_schema"].(map[string]any)
 	if !ok {
 		return RuleResult{ID: r.ID(), Value: 1.0, Pass: true}, nil
@@ -128,7 +128,7 @@ func (r *JSONSchemaRule) Evaluate(_ context.Context, _ *Engine, ev judge.Evidenc
 type RequiredSectionsRule struct{}
 
 func (r *RequiredSectionsRule) ID() string { return "rule_required_sections" }
-func (r *RequiredSectionsRule) Evaluate(_ context.Context, _ *Engine, ev judge.Evidence, meta skillRunMeta) (RuleResult, error) {
+func (r *RequiredSectionsRule) Evaluate(_ context.Context, _ *Engine, ev judge.Evidence, meta run.Meta) (RuleResult, error) {
 	sections, ok := meta.Expect["required_sections"].([]any)
 	if !ok || len(sections) == 0 {
 		return RuleResult{ID: r.ID(), Value: 1.0, Pass: true}, nil
@@ -183,25 +183,6 @@ func boolToFloat(b bool) float64 {
 		return 1.0
 	}
 	return 0.0
-}
-
-type skillRunMeta struct {
-	Budget struct {
-		ToolCalls int `json:"tool_calls"`
-		Seconds   int `json:"seconds"`
-		Tokens    int `json:"tokens"`
-	} `json:"budget"`
-	Expect map[string]any `json:"expect"`
-}
-
-func readSkillRunMeta(runDir string) (skillRunMeta, error) {
-	var meta skillRunMeta
-	b, err := os.ReadFile(filepath.Join(runDir, "skill-run.json"))
-	if err != nil {
-		return meta, err
-	}
-	err = json.Unmarshal(b, &meta)
-	return meta, err
 }
 
 func validateJSONSchema(runDir string, schema map[string]any) (bool, string) {

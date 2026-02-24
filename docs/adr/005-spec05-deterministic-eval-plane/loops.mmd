@@ -1,0 +1,31 @@
+graph TD
+    A[virmux skill run] --> B[virmux skill judge]
+    B --> C[virmux skill ab --judge pairwise]
+    C --> D[virmux skill promote]
+    D --> E[./scripts/canary_run.sh]
+    
+    subgraph L0: Build Truth
+    A
+    B
+    end
+    
+    subgraph L1: Compare Truth
+    C
+    end
+    
+    subgraph L2: Ship Truth
+    D
+    E
+    end
+    
+    subgraph Persistence
+    Trace[runs/ID/trace.ndjson]
+    SQLite[runs/virmux.sqlite]
+    Artifacts[runs/ID/score.json]
+    end
+    
+    A -.-> Trace
+    B -.-> SQLite
+    C -.-> Artifacts
+    D -.-> SQLite
+    E -.-> SQLite

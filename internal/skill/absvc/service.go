@@ -8,6 +8,7 @@ import (
 	"github.com/haris/virmux/internal/skill/eval"
 	"github.com/haris/virmux/internal/skill/evidence"
 	"github.com/haris/virmux/internal/store"
+	"github.com/haris/virmux/internal/trace"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,8 @@ type EvalStore interface {
 	InsertEvalCase(context.Context, store.EvalCase) error
 	InsertExperiment(context.Context, store.Experiment) error
 	InsertComparison(context.Context, store.Comparison) error
+	StartRun(context.Context, store.Run) error
+	FinishRun(context.Context, string, string, int64, int64, string, string, float64, time.Time) error
 }
 
 type Service struct {
@@ -111,6 +114,36 @@ func (s Service) Run(ctx context.Context, in Input) (Result, error) {
 	if err := os.MkdirAll(evalDir, 0o755); err != nil {
 		return Result{}, err
 	}
+
+	tracePath := filepath.Join(evalDir, "trace.ndjson")
+	tw, err := trace.NewWriter(tracePath)
+	if err != nil {
+		return Result{}, err
+	}
+	defer tw.Close()
+
+	task := "skill:ab"
+	startedAt := now().UTC()
+	if err := s.Store.StartRun(ctx, store.Run{
+		ID:        evalID,
+		Task:      task,
+		Label:     "ab-" + in.SkillName,
+		AgentID:   "host",
+		StartedAt: startedAt,
+	}); err != nil {
+		return Result{}, err
+	}
+
+	emit := func(event string, payload map[string]any) {
+		_ = tw.Emit(evalID, task, event, payload)
+	}
+
+	emit("run.started", map[string]any{
+		"skill":    in.SkillName,
+		"base_ref": in.BaseRef,
+		"head_ref": in.HeadRef,
+		"cohort":   cohort,
+	})
 
 	headSnap, err := eval.LoadSkillSnapshot(ctx, ex, in.RepoDir, in.SkillsDir, in.SkillName, in.HeadRef)
 	if err != nil {
@@ -366,6 +399,22 @@ func (s Service) Run(ctx context.Context, in Input) (Result, error) {
 			res.Winner = "tie"
 		}
 	}
+
+	status := "ok"
+	if !res.Pass {
+		status = "failed"
+	}
+	finishPayload := map[string]any{
+		"status":     status,
+		"pass":       res.Pass,
+		"reason":     res.Reason,
+		"score_p50":  res.HeadScore,
+		"fail_rate":  res.HeadFail,
+		"score_delta": res.ScoreDelta,
+		"fail_delta":  res.FailDelta,
+	}
+	emit("run.finished", finishPayload)
+	_ = s.Store.FinishRun(ctx, evalID, status, 0, 0, tracePath, "", res.CostDelta, now().UTC())
 
 	return res, nil
 }

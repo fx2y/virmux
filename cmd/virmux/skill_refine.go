@@ -15,6 +15,7 @@ import (
 	skilleval "github.com/haris/virmux/internal/skill/eval"
 	skillgit "github.com/haris/virmux/internal/skill/gitops"
 	skillrefine "github.com/haris/virmux/internal/skill/refine"
+	skillrun "github.com/haris/virmux/internal/skill/run"
 	skillspec "github.com/haris/virmux/internal/skill/spec"
 	"github.com/haris/virmux/internal/store"
 )
@@ -43,7 +44,7 @@ func cmdSkillRefine(args []string) error {
 		return errors.New("run id cannot be empty")
 	}
 	runDir := filepath.Join(*runsDir, runID)
-	meta, err := readSkillRunMeta(runDir)
+	meta, err := skillrun.ReadMeta(runDir)
 	if err != nil {
 		return err
 	}

@@ -1,0 +1,31 @@
+{
+  "id": "qa-skill-c3-20260224",
+  "skill": "dd",
+  "base_ref": "HEAD~1",
+  "head_ref": "HEAD",
+  "pass": true,
+  "score_p50_delta": 0.15,
+  "fail_rate_delta": -0.05,
+  "cost_delta": 0.02,
+  "verdict": {
+    "pass": true,
+    "hard_gates": {
+      "replay": "PASS",
+      "budget": "PASS",
+      "schema": "PASS"
+    },
+    "soft_gates": {
+      "p50": "PASS",
+      "p90": "WARN",
+      "cost": "PASS"
+    },
+    "anti_tie": "HEAD_WINS"
+  },
+  "experiment": {
+    "id": "qa-skill-c3-20260224-exp",
+    "wr": 0.65,
+    "wins": 13,
+    "losses": 7,
+    "ties": 0
+  }
+}

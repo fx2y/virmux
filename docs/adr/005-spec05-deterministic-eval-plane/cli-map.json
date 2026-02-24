@@ -1,0 +1,31 @@
+{
+  "map_id": "map.cli.ghostfleet->virmux",
+  "doctrine": "translate ghostfleet nouns into virmux canon; never fork command namespace",
+  "mappings": [
+    {
+      "ghostfleet": "eval run",
+      "virmux": "virmux skill run",
+      "notes": "Produces RID, trace.ndjson, skill-run.json"
+    },
+    {
+      "ghostfleet": "eval run --judge",
+      "virmux": "virmux skill judge <rid>",
+      "notes": "Decoupled judge flow; rule-first, fail-closed"
+    },
+    {
+      "ghostfleet": "ab compare",
+      "virmux": "virmux skill ab --judge pairwise --anti-tie",
+      "notes": "Produces EID, experiments, comparisons"
+    },
+    {
+      "ghostfleet": "promote",
+      "virmux": "virmux skill promote <skill> <eid>",
+      "notes": "Hard-gated by passing AB verdict fresh<=24h"
+    },
+    {
+      "ghostfleet": "rollback",
+      "virmux": "virmux skill promote --rollback --to-ref <ref> <skill>",
+      "notes": "Auditable transaction with from/to refs + reason"
+    }
+  ]
+}

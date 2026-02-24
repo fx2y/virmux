@@ -6,17 +6,25 @@ paths:
   - "vm/images.lock"
 ---
 # Script + DAG Rules
-- Bash scripts require `#!/usr/bin/env bash` and `set -euo pipefail`.
-- Reuse `scripts/common.sh`; do not fork duplicate helpers for root/hash/lock/labels.
-- `doctor` is hard preflight: cold-clone runnable, explicit `FAIL:` remediation, `/sys/module/kvm` detection, lock-selected artifact triplet check, executable Firecracker check, AF_UNIX bind/unlink check.
-- Runtime-critical wrappers (`vm_smoke.sh`,`vm_resume.sh`,`vm_zygote.sh`,`vm_smoke_parallel.sh`) must run `./scripts/doctor.sh` prelaunch even if `mise` cache would skip prior lanes.
-- Expensive tasks must declare precise `sources`+`outputs`; incremental skip correctness is contractual.
-- Image pipeline: selector=`vm/images.lock`; cache=`.cache/ghostfleet/images/<sha>/`; manifest bytes pinned/verified; key calc canonical; cache dirs immutable; concurrent builds serialized with bounded lock+stale-owner recovery; `image:seed` cache markers must match network build (`.complete`, `.manifest-built`).
-- Release proof is fresh-run evidence; cache-only green is invalid.
-- `ship:core` must run uncached core gates and emit cohort artifacts; SQL cert on append-only DB is cohort-scoped unless legacy backfill is explicit.
-- `bench:snapshot` hard gate: `total_samples==iterations`, `snapshot_resume_count==iterations`, `fallback_count==0`, p50/p95 within budget.
-- Cleanup audit hard gate: zero orphan `firecracker` procs (`pgrep -x firecracker`), zero stale `firecracker.sock|vsock*.sock|*.fifo`, zero leaked `virmux-tap*`.
-- Skill lane release (`ship:skills`) is isolated/additive: uncached guards, fresh eval cohort proof, docs-drift gate, cleanup audit.
-- `ship:core` must contain zero `skill:*`/`ship:skills` references.
-- Optional lanes (`vm:net:probe`,`slack:recv`,`pw:*`,`skill:*`) stay isolated unless explicitly promoted.
-- Task names are public API; renames require same-diff updates to callers/docs/tests.
+- Bash scripts: `#!/usr/bin/env bash` + `set -euo pipefail`.
+- Reuse `scripts/common.sh`; no duplicate helper forks.
+
+- `doctor` is hard preflight; outputs actionable `FAIL:` remediation.
+- Runtime-critical wrappers (`vm_smoke.sh`,`vm_resume.sh`,`vm_zygote.sh`,`vm_smoke_parallel.sh`) must run `./scripts/doctor.sh` prelaunch.
+
+- Expensive tasks must define precise `sources` + `outputs`; skip correctness is contract.
+- Release proof must be fresh evidence; cache-only green is invalid.
+
+- Image contract: lock=`vm/images.lock`; cache=`.cache/ghostfleet/images/<sha>/`; pinned/verified source bytes; canonical key; immutable cache dirs; bounded lock + stale-owner recovery; `image:seed` markers parity with network build.
+
+- `ship:core` must run uncached core gates and emit cohort artifacts.
+- SQL cert on append-only DB must be cohort-scoped unless explicit legacy backfill.
+- Cleanup audit hard-fails on any orphan `firecracker`, stale `firecracker.sock|vsock*.sock|*.fifo`, leaked `virmux-tap*`.
+
+- `ship:skills` is isolated/additive (fresh C2..C7 evidence + docs-drift + cleanup).
+- `ship:core` must contain zero `skill:*`/`ship:skills` refs.
+- Optional lanes (`vm:net:probe`,`slack:recv`,`pw:*`,`skill:*`) cannot redefine core unless explicitly promoted.
+
+- Cert scope/freshness: queries must be cohort + time-window scoped; historical rows are non-authoritative for cutover.
+- Script parser posture strict: token/enum inputs validated early; no silent fallback.
+- Task names are public API; renames require same-diff caller/docs/test updates.

@@ -256,7 +256,7 @@ func cmdSkillJudgeWithEmitter(args []string, emitEvent skillEventEmitter) error 
 		return errors.New("run id cannot be empty")
 	}
 	runDir := filepath.Join(*runsDir, runID)
-	meta, err := judgeflow.ReadRunMeta(runDir)
+	meta, err := skillrun.ReadMeta(runDir)
 	if err != nil {
 		return err
 	}
@@ -643,40 +643,6 @@ func buildSkillFingerprints(skillDef skillspec.Skill) (skillFingerprints, error)
 	}, nil
 }
 
-type skillRunMeta struct {
-	Skill                string         `json:"skill"`
-	SkillSHA             string         `json:"skill_sha,omitempty"`
-	PromptFingerprint    string         `json:"prompt_fp,omitempty"`
-	SkillBaseFingerprint string         `json:"skill_base_fp,omitempty"`
-	Fixture              string         `json:"fixture"`
-	Tool                 string         `json:"tool"`
-	Deterministic        bool           `json:"deterministic"`
-	Expect               map[string]any `json:"expect,omitempty"`
-	ToolCalls            int            `json:"tool_calls,omitempty"`
-	ExpectFiles          []string       `json:"expect_files,omitempty"`
-}
-
-func readSkillRunMeta(runDir string) (skillRunMeta, error) {
-	b, err := os.ReadFile(filepath.Join(runDir, "skill-run.json"))
-	if err != nil {
-		return skillRunMeta{}, fmt.Errorf("read skill-run.json: %w", err)
-	}
-	var meta skillRunMeta
-	if err := json.Unmarshal(b, &meta); err != nil {
-		return skillRunMeta{}, fmt.Errorf("parse skill-run.json: %w", err)
-	}
-	if len(meta.ExpectFiles) == 0 && meta.Expect != nil {
-		if raw, ok := meta.Expect["files"].([]any); ok {
-			for _, v := range raw {
-				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-					meta.ExpectFiles = append(meta.ExpectFiles, strings.TrimSpace(s))
-				}
-			}
-		}
-	}
-	return meta, nil
-}
-
 func lookupRunTaskStatus(db *store.Store, runID string) (string, string, error) {
 	var task, status string
 	if err := db.DB().QueryRow(`SELECT task,status FROM runs WHERE id=?`, runID).Scan(&task, &status); err != nil {
@@ -995,7 +961,7 @@ func cmdSkillJudgeSanity(args []string) error {
 
 	for _, item := range items {
 		runDir := filepath.Join(*runsDir, item.RunID)
-		meta, err := judgeflow.ReadRunMeta(runDir)
+		meta, err := skillrun.ReadMeta(runDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warn: skip sanity %s: %v\n", item.ID, err)
 			continue

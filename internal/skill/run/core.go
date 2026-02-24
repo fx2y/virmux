@@ -549,3 +549,40 @@ func firstNonEmpty(ss ...string) string {
 	}
 	return ""
 }
+
+type Meta struct {
+	Skill                string         `json:"skill"`
+	SkillSHA             string         `json:"skill_sha,omitempty"`
+	PromptFingerprint    string         `json:"prompt_fp,omitempty"`
+	SkillBaseFingerprint string         `json:"skill_base_fp,omitempty"`
+	Fixture              string         `json:"fixture"`
+	FixtureID            string         `json:"fixture_id,omitempty"`
+	Tool                 string         `json:"tool"`
+	Deterministic        bool           `json:"deterministic"`
+	Budget               Budget         `json:"budget"`
+	Expect               map[string]any `json:"expect,omitempty"`
+	ToolCalls            int            `json:"tool_calls,omitempty"`
+	ExpectFiles          []string       `json:"expect_files,omitempty"`
+}
+
+func ReadMeta(runDir string) (Meta, error) {
+	b, err := os.ReadFile(filepath.Join(runDir, "skill-run.json"))
+	if err != nil {
+		return Meta{}, fmt.Errorf("read skill-run.json: %w", err)
+	}
+	var meta Meta
+	if err := json.Unmarshal(b, &meta); err != nil {
+		return Meta{}, fmt.Errorf("parse skill-run.json: %w", err)
+	}
+	if len(meta.ExpectFiles) == 0 && meta.Expect != nil {
+		if raw, ok := meta.Expect["files"].([]any); ok {
+			for _, v := range raw {
+				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+					meta.ExpectFiles = append(meta.ExpectFiles, strings.TrimSpace(s))
+				}
+			}
+		}
+	}
+	sort.Strings(meta.ExpectFiles)
+	return meta, nil
+}
