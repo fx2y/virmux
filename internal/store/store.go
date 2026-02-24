@@ -116,6 +116,32 @@ type EvalCase struct {
 	CreatedAt time.Time
 }
 
+type Experiment struct {
+	ID        string
+	Skill     string
+	BaseRef   string
+	HeadRef   string
+	CreatedAt time.Time
+}
+
+type Comparison struct {
+	ExperimentID string
+	FixtureID    string
+	Winner       string // "A", "B", "tie"
+	Rationale    string
+	CreatedAt    time.Time
+}
+
+type ExperimentReport struct {
+	ExperimentID string  `json:"experiment_id"`
+	Skill        string  `json:"skill"`
+	WinsA        int     `json:"wins_a"`
+	WinsB        int     `json:"wins_b"`
+	Ties         int     `json:"ties"`
+	WinRate      float64 `json:"win_rate"`
+	Total        int     `json:"total"`
+}
+
 type Promotion struct {
 	ID            string
 	Skill         string
@@ -352,6 +378,22 @@ CREATE TABLE IF NOT EXISTS suggest_runs (
   run_ids_json TEXT NOT NULL DEFAULT '[]',
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS experiments (
+  id TEXT PRIMARY KEY,
+  skill TEXT NOT NULL,
+  base_ref TEXT NOT NULL,
+  head_ref TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS comparisons (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  experiment_id TEXT NOT NULL,
+  fixture_id TEXT NOT NULL,
+  winner TEXT NOT NULL,
+  rationale TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(experiment_id) REFERENCES experiments(id) ON DELETE CASCADE
+);
 CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id);
 CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at);
 CREATE INDEX IF NOT EXISTS idx_artifacts_run_id ON artifacts(run_id);
@@ -367,6 +409,8 @@ CREATE INDEX IF NOT EXISTS idx_promotions_skill_created ON promotions(skill,crea
 CREATE INDEX IF NOT EXISTS idx_refine_runs_run_created ON refine_runs(run_id,created_at);
 CREATE INDEX IF NOT EXISTS idx_refine_runs_skill_created ON refine_runs(skill,created_at);
 CREATE INDEX IF NOT EXISTS idx_suggest_runs_skill_created ON suggest_runs(skill,created_at);
+CREATE INDEX IF NOT EXISTS idx_experiments_skill_created ON experiments(skill, created_at);
+CREATE INDEX IF NOT EXISTS idx_comparisons_experiment_fixture ON comparisons(experiment_id, fixture_id);
 `
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("ensure schema: %w", err)
@@ -779,6 +823,80 @@ func (s *Store) InsertSuggestRun(ctx context.Context, row SuggestRun) error {
 		return fmt.Errorf("insert suggest_run: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) InsertExperiment(ctx context.Context, row Experiment) error {
+	if row.CreatedAt.IsZero() {
+		row.CreatedAt = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO experiments(id,skill,base_ref,head_ref,created_at) VALUES(?,?,?,?,?)`,
+		row.ID,
+		row.Skill,
+		row.BaseRef,
+		row.HeadRef,
+		row.CreatedAt.UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return fmt.Errorf("insert experiment: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) InsertComparison(ctx context.Context, row Comparison) error {
+	if row.CreatedAt.IsZero() {
+		row.CreatedAt = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO comparisons(experiment_id,fixture_id,winner,rationale,created_at) VALUES(?,?,?,?,?)`,
+		row.ExperimentID,
+		row.FixtureID,
+		row.Winner,
+		row.Rationale,
+		row.CreatedAt.UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return fmt.Errorf("insert comparison: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetExperimentReport(ctx context.Context, id string) (ExperimentReport, error) {
+	var report ExperimentReport
+	report.ExperimentID = id
+	err := s.db.QueryRowContext(ctx, `SELECT skill FROM experiments WHERE id=?`, id).Scan(&report.Skill)
+	if err != nil {
+		return report, fmt.Errorf("query experiment skill: %w", err)
+	}
+
+	rows, err := s.db.QueryContext(ctx, `SELECT winner, COUNT(*) FROM comparisons WHERE experiment_id=? GROUP BY winner`, id)
+	if err != nil {
+		return report, fmt.Errorf("query comparison counts: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var winner string
+		var count int
+		if err := rows.Scan(&winner, &count); err != nil {
+			return report, err
+		}
+		switch winner {
+		case "A":
+			report.WinsA = count
+		case "B":
+			report.WinsB = count
+		case "tie":
+			report.Ties = count
+		}
+	}
+	report.Total = report.WinsA + report.WinsB + report.Ties
+	if report.Total > 0 {
+		report.WinRate = float64(report.WinsB) / float64(report.Total)
+	}
+	return report, nil
 }
 
 func (s *Store) LatestEvalRunBySkill(ctx context.Context, skill string) (EvalRun, error) {

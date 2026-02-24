@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -179,11 +180,33 @@ func RunPromptfoo(ctx context.Context, ex Exec, repoDir, promptfooBin, cfgPath, 
 	if strings.TrimSpace(promptfooBin) == "" {
 		promptfooBin = "promptfoo"
 	}
-	if _, err := ex.Run(ctx, skillpkg.Command{Dir: repoDir, Name: promptfooBin, Args: []string{"validate", "-c", cfgPath}, Timeout: timeout}); err != nil {
-		return fmt.Errorf("promptfoo validate failed: %w", err)
+
+	// Try promptfooBin as is (e.g. from flag or default "promptfoo" in PATH)
+	_, err := ex.Run(ctx, skillpkg.Command{Dir: repoDir, Name: promptfooBin, Args: []string{"validate", "-c", cfgPath}, Timeout: timeout})
+	if err == nil {
+		_, err = ex.Run(ctx, skillpkg.Command{Dir: repoDir, Name: promptfooBin, Args: []string{"eval", "-c", cfgPath, "--output", outPath}, Timeout: timeout})
+		if err != nil {
+			return fmt.Errorf("promptfoo eval failed: %w", err)
+		}
+		return nil
 	}
-	if _, err := ex.Run(ctx, skillpkg.Command{Dir: repoDir, Name: promptfooBin, Args: []string{"eval", "-c", cfgPath, "--output", outPath}, Timeout: timeout}); err != nil {
-		return fmt.Errorf("promptfoo eval failed: %w", err)
+
+	// If failed, try local node_modules/.bin/promptfoo
+	localPF := filepath.Join(repoDir, "node_modules", ".bin", "promptfoo")
+	if _, serr := os.Stat(localPF); serr == nil {
+		if _, err := ex.Run(ctx, skillpkg.Command{Dir: repoDir, Name: localPF, Args: []string{"validate", "-c", cfgPath}, Timeout: timeout}); err == nil {
+			if _, err := ex.Run(ctx, skillpkg.Command{Dir: repoDir, Name: localPF, Args: []string{"eval", "-c", cfgPath, "--output", outPath}, Timeout: timeout}); err == nil {
+				return nil
+			}
+		}
+	}
+
+	// Fallback to npx promptfoo@0.118.0
+	if _, err := ex.Run(ctx, skillpkg.Command{Dir: repoDir, Name: "npx", Args: []string{"promptfoo@0.118.0", "validate", "-c", cfgPath}, Timeout: timeout}); err != nil {
+		return fmt.Errorf("npx promptfoo validate failed: %w", err)
+	}
+	if _, err := ex.Run(ctx, skillpkg.Command{Dir: repoDir, Name: "npx", Args: []string{"promptfoo@0.118.0", "eval", "-c", cfgPath, "--output", outPath}, Timeout: timeout}); err != nil {
+		return fmt.Errorf("npx promptfoo eval failed: %w", err)
 	}
 	return nil
 }

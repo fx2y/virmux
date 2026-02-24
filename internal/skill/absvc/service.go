@@ -17,6 +17,8 @@ import (
 type EvalStore interface {
 	InsertEvalRun(context.Context, store.EvalRun) error
 	InsertEvalCase(context.Context, store.EvalCase) error
+	InsertExperiment(context.Context, store.Experiment) error
+	InsertComparison(context.Context, store.Comparison) error
 }
 
 type Service struct {
@@ -41,6 +43,9 @@ type Input struct {
 	CostMax    float64
 	CostGate   bool
 	TimeoutSec int
+
+	JudgeMode string // "pairwise", "independent"
+	AntiTie   bool
 }
 
 type Result struct {
@@ -60,6 +65,10 @@ type Result struct {
 	HeadScore   float64
 	BaseFail    float64
 	HeadFail    float64
+
+	ExperimentID string `json:"experiment_id,omitempty"`
+	Winner       string `json:"winner,omitempty"` // "A", "B", "tie"
+	WinRate      float64 `json:"win_rate,omitempty"`
 }
 
 func (s Service) Run(ctx context.Context, in Input) (Result, error) {
@@ -254,7 +263,7 @@ func (s Service) Run(ctx context.Context, in Input) (Result, error) {
 		}
 	}
 
-	return Result{
+	res := Result{
 		EvalID:      evalID,
 		Skill:       in.SkillName,
 		Cohort:      cohort,
@@ -271,7 +280,88 @@ func (s Service) Run(ctx context.Context, in Input) (Result, error) {
 		HeadScore:   headMetrics.ScoreP50,
 		BaseFail:    baseMetrics.FailRate,
 		HeadFail:    headMetrics.FailRate,
-	}, nil
+	}
+
+	if in.JudgeMode == "pairwise" {
+		expID := fmt.Sprintf("%d-exp", now().UTC().UnixNano())
+		if err := s.Store.InsertExperiment(ctx, store.Experiment{
+			ID:        expID,
+			Skill:     in.SkillName,
+			BaseRef:   in.BaseRef,
+			HeadRef:   in.HeadRef,
+			CreatedAt: now().UTC(),
+		}); err != nil {
+			return Result{}, err
+		}
+
+		var winsA, winsB, ties int
+		for _, id := range ids {
+			bc := baseCases[id]
+			hc := headCases[id]
+			winner := "tie"
+			rationale := "both hard-fail"
+
+			if hc.Score > bc.Score {
+				winner = "B"
+				rationale = "head score higher"
+			} else if bc.Score > hc.Score {
+				winner = "A"
+				rationale = "base score higher"
+			} else {
+				// Scores equal
+				if hc.Pass && !bc.Pass {
+					winner = "B"
+					rationale = "head passed, base failed"
+				} else if bc.Pass && !hc.Pass {
+					winner = "A"
+					rationale = "base passed, head failed"
+				} else if hc.Pass && bc.Pass {
+					// Both pass, equal score. If AntiTie is true, we might still tie or pick one.
+					// Spec says "tie only when both hard-fail".
+					// So if both pass, we should probably pick one or it's a tie if we can't decide.
+					// For now, if both pass and scores same, it's a tie but maybe shouldn't be?
+					if in.AntiTie {
+						winner = "B" // Favor head in anti-tie if both pass?
+						rationale = "anti-tie favor head"
+					} else {
+						winner = "tie"
+						rationale = "both pass with equal score"
+					}
+				}
+			}
+
+			if winner == "A" {
+				winsA++
+			} else if winner == "B" {
+				winsB++
+			} else {
+				ties++
+			}
+
+			if err := s.Store.InsertComparison(ctx, store.Comparison{
+				ExperimentID: expID,
+				FixtureID:    id,
+				Winner:       winner,
+				Rationale:    rationale,
+				CreatedAt:    now().UTC(),
+			}); err != nil {
+				return Result{}, err
+			}
+		}
+		res.ExperimentID = expID
+		if len(ids) > 0 {
+			res.WinRate = float64(winsB) / float64(len(ids))
+		}
+		if winsB > winsA {
+			res.Winner = "B"
+		} else if winsA > winsB {
+			res.Winner = "A"
+		} else {
+			res.Winner = "tie"
+		}
+	}
+
+	return res, nil
 }
 
 func headOrRaw(raw []byte) any {

@@ -702,9 +702,30 @@ func cmdSkillAB(args []string) error {
 	costMax := fs.Float64("cost-delta-max", 0.0, "maximum allowed cost delta (head-base)")
 	costGate := fs.Bool("cost-gate", false, "enforce cost delta threshold")
 	timeoutSec := fs.Int("timeout-sec", 120, "promptfoo validate/eval timeout per side")
+
+	judgeMode := fs.String("judge", "independent", "judge mode (independent or pairwise)")
+	antiTie := fs.Bool("anti-tie", false, "favor head in ties if both pass (pairwise mode only)")
+	reportOnly := fs.Bool("report-only", false, "only print report for existing eval/experiment")
+	evalIDFlag := fs.String("eval-id", "", "eval/experiment id for report-only")
+	fmtFlag := fs.String("fmt", "json", "report format (json, one-line)")
+
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	if *reportOnly {
+		if *evalIDFlag == "" {
+			return errors.New("--eval-id is required for --report-only")
+		}
+		return runABReport(context.Background(), st, *evalIDFlag, *fmtFlag)
+	}
+
 	pos := fs.Args()
 	if len(pos) < 2 || len(pos) > 3 {
 		return errors.New("usage: virmux skill ab <skill> <base..head>|<base> <head>")
@@ -732,11 +753,7 @@ func cmdSkillAB(args []string) error {
 	if baseRef == headRef {
 		return errors.New("base and head refs must differ")
 	}
-	st, err := store.Open(*dbPath)
-	if err != nil {
-		return err
-	}
-	defer st.Close()
+
 	res, err := absvc.Service{
 		Store: st,
 		Now:   time.Now,
@@ -755,6 +772,8 @@ func cmdSkillAB(args []string) error {
 		CostMax:      *costMax,
 		CostGate:     *costGate,
 		TimeoutSec:   *timeoutSec,
+		JudgeMode:    *judgeMode,
+		AntiTie:      *antiTie,
 	})
 	if err != nil {
 		return err
@@ -781,11 +800,57 @@ func cmdSkillAB(args []string) error {
 			"head_fail_rate":  res.HeadFail,
 		},
 	}
+	if res.ExperimentID != "" {
+		out["experiment"] = map[string]any{
+			"id":       res.ExperimentID,
+			"winner":   res.Winner,
+			"win_rate": res.WinRate,
+		}
+	}
 	ob, _ := json.Marshal(out)
 	fmt.Println(string(ob))
 	if !res.Pass {
 		return fmt.Errorf("AB_REGRESSION: %s", res.Reason)
 	}
+	return nil
+}
+
+func runABReport(ctx context.Context, st *store.Store, id, fmtStr string) error {
+	// Try eval_run first
+	ev, err := st.GetEvalRun(ctx, id)
+	if err == nil {
+		if fmtStr == "one-line" {
+			fmt.Printf("id=%s skill=%s pass=%v score_p50_delta=%.4f fail_rate_delta=%.4f cost_delta=%.4f\n",
+				ev.ID, ev.Skill, ev.Pass, ev.ScoreP50Delta, ev.FailRateDelta, ev.CostDelta)
+			return nil
+		}
+		out := map[string]any{
+			"id":     ev.ID,
+			"skill":  ev.Skill,
+			"pass":   ev.Pass,
+			"deltas": map[string]any{
+				"score_p50_delta": ev.ScoreP50Delta,
+				"fail_rate_delta": ev.FailRateDelta,
+				"cost_delta":      ev.CostDelta,
+			},
+		}
+		b, _ := json.Marshal(out)
+		fmt.Println(string(b))
+		return nil
+	}
+
+	// Try experiment
+	report, err := st.GetExperimentReport(ctx, id)
+	if err != nil {
+		return fmt.Errorf("id %s not found in eval_runs or experiments: %w", id, err)
+	}
+	if fmtStr == "one-line" {
+		fmt.Printf("id=%s skill=%s wr=%.4f wins_a=%d wins_b=%d ties=%d total=%d\n",
+			report.ExperimentID, report.Skill, report.WinRate, report.WinsA, report.WinsB, report.Ties, report.Total)
+		return nil
+	}
+	b, _ := json.Marshal(report)
+	fmt.Println(string(b))
 	return nil
 }
 

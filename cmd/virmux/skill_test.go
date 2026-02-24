@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1068,6 +1070,118 @@ JSON
 	}
 	if strings.Contains(string(baseCfg), "echo base") {
 		t.Fatalf("base cfg should not use base fixture payload")
+	}
+}
+
+func TestCmdSkillABPairwiseAndReport(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	repo := filepath.Join(tmp, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, string(out))
+		}
+		return strings.TrimSpace(string(out))
+	}
+	runGit("init")
+	runGit("config", "user.email", "test@example.com")
+	runGit("config", "user.name", "tester")
+	skillDir := filepath.Join(repo, "skills", "dd")
+	if err := os.MkdirAll(filepath.Join(skillDir, "tests"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: dd\ndescription: x\nrequires: {bins: [], env: [], config: []}\nos: [linux]\n---\n# Steps\nDo x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "tests", "case01.json"), []byte(`{"id":"case01","tool":"shell.exec","args":{"cmd":"echo base"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", ".")
+	runGit("commit", "-m", "base")
+	baseRef := runGit("rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", ".")
+	runGit("commit", "-m", "head")
+	headRef := runGit("rev-parse", "HEAD")
+	fakePF := filepath.Join(tmp, "fake_promptfoo.sh")
+	if err := os.WriteFile(fakePF, []byte(`#!/usr/bin/env bash
+set -euo pipefail
+cmd="${1:-}"; shift || true
+if [[ "$cmd" == "validate" ]]; then exit 0; fi
+out=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+score=0.9
+if [[ "$out" == *".base."* ]]; then score=0.8; fi
+cat > "$out" <<JSON
+{"results":[{"metadata":{"fixture_id":"case01"},"score":$score,"success":true,"cost":1.0}]}
+JSON
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runsDir := filepath.Join(repo, "runs")
+	dbPath := filepath.Join(runsDir, "virmux.sqlite")
+	if err := cmdSkillAB([]string{
+		"--db", dbPath,
+		"--runs-dir", runsDir,
+		"--repo-dir", repo,
+		"--skills-dir", "skills",
+		"--promptfoo-bin", fakePF,
+		"--judge", "pairwise",
+		"dd", baseRef + ".." + headRef,
+	}); err != nil {
+		t.Fatalf("cmdSkillAB: %v", err)
+	}
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	var expID string
+	if err := st.DB().QueryRow(`SELECT id FROM experiments LIMIT 1`).Scan(&expID); err != nil {
+		t.Fatal(err)
+	}
+	if expID == "" {
+		t.Fatal("expected experiment row")
+	}
+
+	// Test report-only
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	if err := cmdSkillAB([]string{
+		"--db", dbPath,
+		"--report-only",
+		"--eval-id", expID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	os.Stdout = oldStdout
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	var report map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &report); err != nil {
+		t.Fatalf("parse report json: %v\n%s", err, buf.String())
+	}
+	if report["experiment_id"] != expID {
+		t.Fatalf("report exp_id mismatch got=%v want=%s", report["experiment_id"], expID)
+	}
+	if fmt.Sprintf("%v", report["wins_b"]) != "1" {
+		t.Fatalf("expected 1 win for B, got %v", report["wins_b"])
 	}
 }
 

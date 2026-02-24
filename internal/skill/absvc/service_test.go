@@ -103,3 +103,63 @@ func TestServiceRunPersistsEvalRowsAndFrozenFixtures(t *testing.T) {
 		t.Fatalf("expected one eval_run row, got %d", rows)
 	}
 }
+
+func TestServicePairwiseMode(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	runsDir := filepath.Join(tmp, "runs")
+	dbPath := filepath.Join(runsDir, "virmux.sqlite")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	svc := Service{Store: st, Exec: fakeExec{}, Now: func() time.Time { return time.Unix(1700000000, 0).UTC() }}
+	res, err := svc.Run(context.Background(), Input{
+		RepoDir:      tmp,
+		SkillsDir:    "skills",
+		RunsDir:      runsDir,
+		SkillName:    "dd",
+		BaseRef:      "b1",
+		HeadRef:      "h1",
+		Provider:     "openai:gpt-4.1-mini",
+		PromptfooBin: "pf",
+		TimeoutSec:   30,
+		JudgeMode:    "pairwise",
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if res.ExperimentID == "" {
+		t.Fatal("expected ExperimentID in result")
+	}
+	if res.Winner != "B" {
+		t.Fatalf("expected winner B, got %s", res.Winner)
+	}
+
+	var expCount int
+	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM experiments WHERE id=?`, res.ExperimentID).Scan(&expCount); err != nil {
+		t.Fatal(err)
+	}
+	if expCount != 1 {
+		t.Fatalf("expected one experiment row, got %d", expCount)
+	}
+
+	var compCount int
+	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM comparisons WHERE experiment_id=?`, res.ExperimentID).Scan(&compCount); err != nil {
+		t.Fatal(err)
+	}
+	if compCount != 1 {
+		t.Fatalf("expected one comparison row, got %d", compCount)
+	}
+
+	report, err := st.GetExperimentReport(context.Background(), res.ExperimentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.WinsB != 1 || report.WinsA != 0 || report.Ties != 0 {
+		t.Fatalf("report mismatch: %+v", report)
+	}
+}
