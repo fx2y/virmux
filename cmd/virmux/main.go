@@ -93,6 +93,8 @@ func run(args []string) error {
 		return cmdExport(args[1:])
 	case "import":
 		return cmdImport(args[1:])
+	case "research":
+		return cmdResearch(args[1:])
 	case "slack-server":
 		return cmdSlackServer(args[1:])
 	default:
