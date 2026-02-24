@@ -59,16 +59,21 @@ type Score struct {
 }
 
 type JudgeRun struct {
-	RunID        string
-	Skill        string
-	RubricHash   string
-	JudgeCfgHash string
-	ArtifactHash string
-	MetricsJSON  string
-	Critique     string
-	Score        float64
-	Pass         bool
-	CreatedAt    time.Time
+	RunID             string
+	Skill             string
+	RubricHash        string
+	JudgeCfgHash      string
+	ArtifactHash      string
+	MetricsJSON       string
+	Critique          string
+	Score             float64
+	Pass              bool
+	CreatedAt         time.Time
+	ModelID           string
+	PromptHash        string
+	SchemaVer         string
+	Mode              string
+	JudgeInvalidCount int
 }
 
 type EvalRun struct {
@@ -262,6 +267,11 @@ CREATE TABLE IF NOT EXISTS judge_runs (
   score REAL NOT NULL,
   pass INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
+  model_id TEXT NOT NULL DEFAULT '',
+  prompt_hash TEXT NOT NULL DEFAULT '',
+  schema_ver TEXT NOT NULL DEFAULT '',
+  mode TEXT NOT NULL DEFAULT 'rules',
+  judge_invalid_count INTEGER NOT NULL DEFAULT 0,
   FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS eval_runs (
@@ -378,6 +388,24 @@ CREATE INDEX IF NOT EXISTS idx_suggest_runs_skill_created ON suggest_runs(skill,
 	}
 	if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN source_bundle TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("ensure runs.source_bundle: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE judge_runs ADD COLUMN model_id TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("ensure judge_runs.model_id: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE judge_runs ADD COLUMN prompt_hash TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("ensure judge_runs.prompt_hash: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE judge_runs ADD COLUMN schema_ver TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("ensure judge_runs.schema_ver: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE judge_runs ADD COLUMN mode TEXT NOT NULL DEFAULT 'rules'`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("ensure judge_runs.mode: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE judge_runs ADD COLUMN judge_invalid_count INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("ensure judge_runs.judge_invalid_count: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_judge_runs_skill_created_mode ON judge_runs(skill,created_at,mode)`); err != nil {
+		return fmt.Errorf("ensure idx_judge_runs_skill_created_mode: %w", err)
 	}
 	return nil
 }
@@ -530,9 +558,12 @@ func (s *Store) InsertJudgeRun(ctx context.Context, row JudgeRun) error {
 	if row.Pass {
 		passInt = 1
 	}
+	if row.Mode == "" {
+		row.Mode = "rules"
+	}
 	_, err := s.db.ExecContext(
 		ctx,
-		`INSERT INTO judge_runs(run_id,skill,rubric_hash,judge_cfg_hash,artifact_hash,metrics_json,critique,score,pass,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO judge_runs(run_id,skill,rubric_hash,judge_cfg_hash,artifact_hash,metrics_json,critique,score,pass,created_at,model_id,prompt_hash,schema_ver,mode,judge_invalid_count) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		row.RunID,
 		row.Skill,
 		row.RubricHash,
@@ -543,6 +574,11 @@ func (s *Store) InsertJudgeRun(ctx context.Context, row JudgeRun) error {
 		row.Score,
 		passInt,
 		row.CreatedAt.UTC().Format(time.RFC3339Nano),
+		row.ModelID,
+		row.PromptHash,
+		row.SchemaVer,
+		row.Mode,
+		row.JudgeInvalidCount,
 	)
 	if err != nil {
 		return fmt.Errorf("insert judge_run: %w", err)

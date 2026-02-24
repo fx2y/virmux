@@ -38,6 +38,8 @@ type Evidence struct {
 	RunStatus   string   `json:"run_status"`
 	ToolCalls   int      `json:"tool_calls"`
 	ExpectFiles []string `json:"expect_files,omitempty"`
+	Mode        string   `json:"mode,omitempty"`
+	ModelID     string   `json:"model_id,omitempty"`
 }
 
 type CriterionScore struct {
@@ -59,6 +61,10 @@ type Result struct {
 	RubricHash   string           `json:"rubric_hash"`
 	JudgeCfgHash string           `json:"judge_cfg_hash"`
 	ArtifactHash string           `json:"artifact_hash"`
+	ModelID      string           `json:"model_id,omitempty"`
+	PromptHash   string           `json:"prompt_hash,omitempty"`
+	SchemaVer    string           `json:"schema_ver,omitempty"`
+	Mode         string           `json:"mode,omitempty"`
 }
 
 func LoadRubric(path string) (Rubric, string, error) {
@@ -163,8 +169,10 @@ func Evaluate(r Rubric, rubricHash string, ev Evidence) (Result, error) {
 		return Result{}, err
 	}
 	judgeCfg := map[string]any{
-		"engine": engineVersion,
-		"rubric": canonicalRubric(r),
+		"engine":   engineVersion,
+		"rubric":   canonicalRubric(r),
+		"mode":     ev.Mode,
+		"model_id": ev.ModelID,
 	}
 	cfgBytes, _ := json.Marshal(judgeCfg)
 	res := Result{
@@ -174,6 +182,8 @@ func Evaluate(r Rubric, rubricHash string, ev Evidence) (Result, error) {
 		RubricHash:   rubricHash,
 		JudgeCfgHash: trace.SHA256Hex(cfgBytes),
 		ArtifactHash: artHash,
+		Mode:         ev.Mode,
+		ModelID:      ev.ModelID,
 	}
 	mustOK := true
 	for _, c := range r.Criteria {

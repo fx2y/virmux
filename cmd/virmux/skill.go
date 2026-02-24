@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -233,8 +234,14 @@ func cmdSkillJudgeWithEmitter(args []string, emitEvent skillEventEmitter) error 
 	dbPath := fs.String("db", "runs/virmux.sqlite", "sqlite db path")
 	skillsDir := fs.String("skills-dir", "skills", "skills root directory")
 	rubricPath := fs.String("rubric", "", "optional rubric path override")
+	mode := fs.String("mode", "rules", "judge mode (rules, llm_abs, llm_probe)")
+	model := fs.String("model", "", "model id for llm modes")
+	sanityDset := fs.String("sanity-dset", "", "path to sanity dataset for agreement check")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *sanityDset != "" {
+		return cmdSkillJudgeSanity(args)
 	}
 	if len(fs.Args()) != 1 {
 		return errors.New("usage: virmux skill judge <run-id>")
@@ -288,6 +295,8 @@ func cmdSkillJudgeWithEmitter(args []string, emitEvent skillEventEmitter) error 
 		InsertScore:    st.InsertScore,
 		InsertJudgeRun: st.InsertJudgeRun,
 		Now:            time.Now,
+		DBPath:         *dbPath,
+		RunsDir:        *runsDir,
 	}
 	runRes, err := svc.Run(ctx, judgeflow.Input{
 		RunID:      runID,
@@ -300,6 +309,8 @@ func cmdSkillJudgeWithEmitter(args []string, emitEvent skillEventEmitter) error 
 		Rubric:     r,
 		ToolCalls:  meta.ToolCalls,
 		ExpectFile: meta.ExpectFiles,
+		Mode:       *mode,
+		ModelID:    *model,
 	})
 	if err != nil {
 		return err
@@ -824,5 +835,131 @@ func cmdSkillPromote(args []string) error {
 	}
 	b, _ := json.Marshal(out)
 	fmt.Println(string(b))
+	return nil
+}
+
+func cmdSkillJudgeSanity(args []string) error {
+	fs := flag.NewFlagSet("skill judge --sanity-dset", flag.ContinueOnError)
+	sanityDset := fs.String("sanity-dset", "", "path to sanity dataset")
+	dbPath := fs.String("db", "runs/virmux.sqlite", "sqlite db path")
+	runsDir := fs.String("runs-dir", "runs", "runs directory")
+	skillsDir := fs.String("skills-dir", "skills", "skills root directory")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *sanityDset == "" {
+		return errors.New("--sanity-dset is required")
+	}
+
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	f, err := os.Open(*sanityDset)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	type SanityItem struct {
+		ID       string `json:"id"`
+		RunID    string `json:"run_id"`
+		Skill    string `json:"skill"`
+		Expected struct {
+			Score float64 `json:"score"`
+			Pass  bool    `json:"pass"`
+		} `json:"expected"`
+	}
+
+	var items []SanityItem
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		var item SanityItem
+		if err := json.Unmarshal(sc.Bytes(), &item); err != nil {
+			return err
+		}
+		items = append(items, item)
+	}
+
+	var (
+		agreed int
+		total  int
+	)
+
+	for _, item := range items {
+		total++
+		runDir := filepath.Join(*runsDir, item.RunID)
+		meta, err := judgeflow.ReadRunMeta(runDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warn: skip sanity %s: %v\n", item.ID, err)
+			continue
+		}
+		rubric := filepath.Join(*skillsDir, item.Skill, "rubric.yaml")
+		r, rubricHash, err := skilljudge.LoadRubric(rubric)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warn: skip sanity %s: rubric error: %v\n", item.ID, err)
+			continue
+		}
+		task, status, err := lookupRunTaskStatus(st, item.RunID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warn: skip sanity %s: db error: %v\n", item.ID, err)
+			continue
+		}
+		tw, err := trace.NewWriter("/dev/null")
+		if err != nil {
+			tw = nil
+		}
+
+		svc := judgeflow.Service{
+			Emit: func(ctx context.Context, event string, payload map[string]any) error { return nil },
+			PersistArtifacts: func(ctx context.Context, runID string, paths []string) error { return nil },
+			InsertScore:    func(ctx context.Context, row store.Score) error { return nil },
+			InsertJudgeRun: func(ctx context.Context, row store.JudgeRun) error { return nil },
+			Now:            time.Now,
+			DBPath:         *dbPath,
+			RunsDir:        *runsDir,
+		}
+
+		res, err := svc.Run(context.Background(), judgeflow.Input{
+			RunID:      item.RunID,
+			RunDir:     runDir,
+			RunTask:    task,
+			RunStatus:  status,
+			Skill:      item.Skill,
+			RubricPath: rubric,
+			RubricHash: rubricHash,
+			Rubric:     r,
+			ToolCalls:  meta.ToolCalls,
+			ExpectFile: meta.ExpectFiles,
+			Mode:       "rules",
+		})
+		if tw != nil {
+			tw.Close()
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warn: skip sanity %s: eval error: %v\n", item.ID, err)
+			continue
+		}
+
+		if res.Judge.Pass == item.Expected.Pass {
+			agreed++
+		}
+	}
+
+	agreement := 0.0
+	if total > 0 {
+		agreement = float64(agreed) / float64(total)
+	}
+
+	out := map[string]any{
+		"total":     total,
+		"agreed":    agreed,
+		"agreement": agreement,
+	}
+	b, _ := json.Marshal(out)
+	fmt.Println(string(b))
+
 	return nil
 }

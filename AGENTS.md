@@ -36,7 +36,7 @@ Deterministic Firecracker harness with replayable proof: immutable inputs, host-
 - Resume policy: snapshot attempt once; any resolve/load/wait fault => `StopVMM+Wait` then cold fallback.
 - Resume event rule: every `vm:resume` terminal event must include non-null `resume_mode`,`resume_source`,`resume_error`.
 - Shutdown bounds: waits are watchdog-mediated; stalled waits may SIGKILL FC and must trace `vm.watchdog.kill`.
-- Host-visible error classes are stable (`TIMEOUT`,`DISCONNECT`,`CRASH`,`DENIED`,`INTERNAL`), not ad-hoc strings.
+- Host-visible error classes are stable (`TIMEOUT`,`DISCONNECT`,`CRASH`,`DENIED`,`INTERNAL`,`JUDGE_INVALID`), not ad-hoc strings.
 
 ## Skill Plane (Spec-04)
 - Canon artifacts: `skills/<name>/SKILL.md` is SoT; `prompt.md` is compat shim only.
@@ -53,7 +53,7 @@ Deterministic Firecracker harness with replayable proof: immutable inputs, host-
 - `skill refine`: default eval resolution is latest passing AB row; deny `tools.yaml` edits unless explicit opt-in; dirty target files hard-fail pre-branch; output refs must be run-relative/repo-relative only.
 - `skill suggest`: motif/key must derive from run evidence snapshots (not workspace HEAD), dedupe latest score per run, normalize run-scoped refs, and re-anchor each candidate branch to captured base HEAD.
 - Skill lane isolation: `ship:skills` is optional/additive and must not couple into `ship:core`.
-- Typed skill failures are stable API (at minimum): `TOOL_DENIED`,`BUDGET_EXCEEDED`,`REPLAY_MISMATCH`,`NONDET_FIXTURE`,`AB_REGRESSION`,`MISSING_AB_VERDICT`,`STALE_AB_VERDICT`,`REFINE_PATCH_TOO_LARGE`,`SUGGEST_NOT_TRIGGERED`,`SKILL_PATH_ESCAPE`.
+- Typed skill failures are stable API (at minimum): `TOOL_DENIED`,`BUDGET_EXCEEDED`,`REPLAY_MISMATCH`,`NONDET_FIXTURE`,`AB_REGRESSION`,`MISSING_AB_VERDICT`,`STALE_AB_VERDICT`,`REFINE_PATCH_TOO_LARGE`,`SUGGEST_NOT_TRIGGERED`,`SKILL_PATH_ESCAPE`,`JUDGE_INVALID`.
 
 ## Release Oracle
 - Decisive core gate: `mise run ship:core` (fresh/uncached proof).

@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	skilljudge "github.com/haris/virmux/internal/skill/judge"
+	"github.com/haris/virmux/internal/skill/rules"
 	skillrun "github.com/haris/virmux/internal/skill/run"
 	"github.com/haris/virmux/internal/store"
 )
@@ -25,6 +27,8 @@ type Service struct {
 	InsertScore      func(context.Context, store.Score) error
 	InsertJudgeRun   func(context.Context, store.JudgeRun) error
 	Now              func() time.Time
+	DBPath           string
+	RunsDir          string
 }
 
 type Input struct {
@@ -38,6 +42,8 @@ type Input struct {
 	Rubric     skilljudge.Rubric
 	ToolCalls  int
 	ExpectFile []string
+	Mode       string // rules, llm_abs, llm_probe
+	ModelID    string
 }
 
 type Result struct {
@@ -60,17 +66,60 @@ func (s Service) Run(ctx context.Context, in Input) (Result, error) {
 	}); err != nil {
 		return Result{}, err
 	}
-	res, err := skilljudge.Evaluate(in.Rubric, in.RubricHash, skilljudge.Evidence{
+
+	ev := skilljudge.Evidence{
 		RunID:       in.RunID,
 		Skill:       in.Skill,
 		RunDir:      in.RunDir,
 		RunStatus:   in.RunStatus,
 		ToolCalls:   in.ToolCalls,
 		ExpectFiles: in.ExpectFile,
-	})
+		Mode:        in.Mode,
+		ModelID:     in.ModelID,
+	}
+
+	res, err := skilljudge.Evaluate(in.Rubric, in.RubricHash, ev)
 	if err != nil {
 		return Result{}, err
 	}
+
+	// Add rule engine results
+	ruleEngine := &rules.Engine{
+		DBPath:  s.DBPath,
+		RunsDir: s.RunsDir,
+	}
+	ruleResults, err := ruleEngine.Evaluate(ctx, ev)
+	if err == nil {
+		for _, rr := range ruleResults {
+			found := false
+			for i, c := range res.Criterion {
+				if c.ID == rr.ID {
+					res.Criterion[i].Value = rr.Value
+					res.Criterion[i].Pass = rr.Pass
+					res.Criterion[i].Reason = rr.Reason
+					found = true
+					break
+				}
+			}
+			if !rr.Pass {
+				res.Critique = append(res.Critique, rr.Reason)
+			}
+			_ = found // for now we don't add non-rubric criteria
+		}
+		// Re-calculate score and pass if rules modified criteria
+		res.Score = 0
+		mustOK := true
+		for _, c := range res.Criterion {
+			res.Score += c.Weight * c.Value
+			if c.Must && !c.Pass {
+				mustOK = false
+			}
+		}
+		res.Pass = res.Score >= in.Rubric.Pass && mustOK
+		sort.Strings(res.Critique)
+		res.Critique = dedupe(res.Critique)
+	}
+
 	scorePath, err := skillrun.EnsureScorePlaceholder(in.RunDir, map[string]any{
 		"run_id":         res.RunID,
 		"skill":          res.Skill,
@@ -81,6 +130,8 @@ func (s Service) Run(ctx context.Context, in Input) (Result, error) {
 		"rubric_hash":    res.RubricHash,
 		"judge_cfg_hash": res.JudgeCfgHash,
 		"artifact_hash":  res.ArtifactHash,
+		"mode":           res.Mode,
+		"model_id":       res.ModelID,
 	})
 	if err != nil {
 		return Result{}, err
@@ -111,6 +162,10 @@ func (s Service) Run(ctx context.Context, in Input) (Result, error) {
 		Score:        res.Score,
 		Pass:         res.Pass,
 		CreatedAt:    ts,
+		Mode:         res.Mode,
+		ModelID:      res.ModelID,
+		PromptHash:   res.PromptHash,
+		SchemaVer:    res.SchemaVer,
 	}); err != nil {
 		return Result{}, err
 	}
@@ -168,6 +223,22 @@ func CriteriaMap(in []skilljudge.CriterionScore) map[string]float64 {
 	out := make(map[string]float64, len(in))
 	for _, c := range in {
 		out[c.ID] = c.Value
+	}
+	return out
+}
+
+func dedupe(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	sort.Strings(in)
+	out := in[:0]
+	var prev string
+	for i, s := range in {
+		if i == 0 || s != prev {
+			out = append(out, s)
+			prev = s
+		}
 	}
 	return out
 }
