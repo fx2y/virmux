@@ -1,0 +1,1 @@
+{"id":"torture-0001","input":{"prompt":"Handle noisy multi-step request with strict format"},"context_refs":["skills/dd/SKILL.md"],"expected_properties":{"must":["format_ok","failure_reason_if_any"]},"tags":["torture","longctx","messy"]}

@@ -201,6 +201,25 @@ func TestStoreSchemaAndFK(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("insert suggest_run: %v", err)
 	}
+	if err := s.InsertCanaryRun(ctx, CanaryRun{
+		ID:               "canary-1",
+		Skill:            "dd",
+		EvalRunID:        "ab-1",
+		CuratedEvalRunID: "ab-2",
+		DsetPath:         "dsets/prod_20260224.jsonl",
+		DsetSHA256:       "sha256:dset",
+		DsetCount:        3,
+		CandidateRef:     "head",
+		BaselineRef:      "base",
+		GateVerdictJSON:  `{"pass":false}`,
+		Action:           "rollback",
+		ActionRef:        "base",
+		CaughtByCanary:   true,
+		BacklogPath:      "runs/ab-1/canary-backlog.md",
+		SummaryPath:      "runs/ab-1/canary-summary.json",
+	}); err != nil {
+		t.Fatalf("insert canary_run: %v", err)
+	}
 	var idxCount int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_artifacts_run_id'`).Scan(&idxCount); err != nil {
 		t.Fatalf("query artifacts index: %v", err)
@@ -255,6 +274,18 @@ func TestStoreSchemaAndFK(t *testing.T) {
 	}
 	if idxCount != 1 {
 		t.Fatalf("expected idx_suggest_runs_skill_created, got %d", idxCount)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_canary_runs_skill_created'`).Scan(&idxCount); err != nil {
+		t.Fatalf("query canary_runs skill index: %v", err)
+	}
+	if idxCount != 1 {
+		t.Fatalf("expected idx_canary_runs_skill_created, got %d", idxCount)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_canary_runs_eval_run'`).Scan(&idxCount); err != nil {
+		t.Fatalf("query canary_runs eval index: %v", err)
+	}
+	if idxCount != 1 {
+		t.Fatalf("expected idx_canary_runs_eval_run, got %d", idxCount)
 	}
 }
 

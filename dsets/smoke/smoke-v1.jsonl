@@ -1,0 +1,1 @@
+{"id":"smoke-0001","input":{"prompt":"Summarize one-line status"},"context_refs":["skills/dd/SKILL.md"],"expected_properties":{"must":["single_line"]},"tags":["smoke"]}

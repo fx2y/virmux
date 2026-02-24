@@ -1,0 +1,1 @@
+{"id":"core-0001","input":{"prompt":"Draft concise decision memo"},"context_refs":["skills/dd/SKILL.md"],"expected_properties":{"must":["risks","decision"]},"tags":["core","toolheavy"]}

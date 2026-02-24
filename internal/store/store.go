@@ -187,6 +187,25 @@ type SuggestRun struct {
 	CreatedAt  time.Time
 }
 
+type CanaryRun struct {
+	ID               string
+	Skill            string
+	EvalRunID        string
+	CuratedEvalRunID string
+	DsetPath         string
+	DsetSHA256       string
+	DsetCount        int
+	CandidateRef     string
+	BaselineRef      string
+	GateVerdictJSON  string
+	Action           string
+	ActionRef        string
+	CaughtByCanary   bool
+	BacklogPath      string
+	SummaryPath      string
+	CreatedAt        time.Time
+}
+
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create db dir: %w", err)
@@ -406,6 +425,26 @@ CREATE TABLE IF NOT EXISTS comparisons (
   created_at TEXT NOT NULL,
   FOREIGN KEY(experiment_id) REFERENCES experiments(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS canary_runs (
+  id TEXT PRIMARY KEY,
+  skill TEXT NOT NULL,
+  eval_run_id TEXT NOT NULL,
+  curated_eval_run_id TEXT NOT NULL DEFAULT '',
+  dset_path TEXT NOT NULL DEFAULT '',
+  dset_sha256 TEXT NOT NULL DEFAULT '',
+  dset_count INTEGER NOT NULL DEFAULT 0,
+  candidate_ref TEXT NOT NULL DEFAULT '',
+  baseline_ref TEXT NOT NULL DEFAULT '',
+  gate_verdict_json TEXT NOT NULL DEFAULT '{}',
+  action TEXT NOT NULL DEFAULT '',
+  action_ref TEXT NOT NULL DEFAULT '',
+  caught_by_canary INTEGER NOT NULL DEFAULT 0,
+  backlog_path TEXT NOT NULL DEFAULT '',
+  summary_path TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(eval_run_id) REFERENCES eval_runs(id) ON DELETE RESTRICT,
+  FOREIGN KEY(curated_eval_run_id) REFERENCES eval_runs(id) ON DELETE RESTRICT
+);
 CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id);
 CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at);
 CREATE INDEX IF NOT EXISTS idx_artifacts_run_id ON artifacts(run_id);
@@ -423,6 +462,8 @@ CREATE INDEX IF NOT EXISTS idx_refine_runs_skill_created ON refine_runs(skill,cr
 CREATE INDEX IF NOT EXISTS idx_suggest_runs_skill_created ON suggest_runs(skill,created_at);
 CREATE INDEX IF NOT EXISTS idx_experiments_skill_created ON experiments(skill, created_at);
 CREATE INDEX IF NOT EXISTS idx_comparisons_experiment_fixture ON comparisons(experiment_id, fixture_id);
+CREATE INDEX IF NOT EXISTS idx_canary_runs_skill_created ON canary_runs(skill,created_at);
+CREATE INDEX IF NOT EXISTS idx_canary_runs_eval_run ON canary_runs(eval_run_id);
 `
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("ensure schema: %w", err)
@@ -480,6 +521,12 @@ CREATE INDEX IF NOT EXISTS idx_comparisons_experiment_fixture ON comparisons(exp
 	}
 	if _, err := db.Exec(`ALTER TABLE promotions ADD COLUMN op TEXT NOT NULL DEFAULT 'promote'`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("ensure promotions.op: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_canary_runs_skill_created ON canary_runs(skill,created_at)`); err != nil {
+		return fmt.Errorf("ensure idx_canary_runs_skill_created: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_canary_runs_eval_run ON canary_runs(eval_run_id)`); err != nil {
+		return fmt.Errorf("ensure idx_canary_runs_eval_run: %w", err)
 	}
 	return nil
 }
@@ -864,6 +911,45 @@ func (s *Store) InsertSuggestRun(ctx context.Context, row SuggestRun) error {
 	)
 	if err != nil {
 		return fmt.Errorf("insert suggest_run: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) InsertCanaryRun(ctx context.Context, row CanaryRun) error {
+	if row.CreatedAt.IsZero() {
+		row.CreatedAt = time.Now().UTC()
+	}
+	caught := 0
+	if row.CaughtByCanary {
+		caught = 1
+	}
+	var curated sql.NullString
+	if row.CuratedEvalRunID != "" {
+		curated = sql.NullString{String: row.CuratedEvalRunID, Valid: true}
+	}
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO canary_runs(id,skill,eval_run_id,curated_eval_run_id,dset_path,dset_sha256,dset_count,candidate_ref,baseline_ref,gate_verdict_json,action,action_ref,caught_by_canary,backlog_path,summary_path,created_at)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		row.ID,
+		row.Skill,
+		row.EvalRunID,
+		curated,
+		row.DsetPath,
+		row.DsetSHA256,
+		row.DsetCount,
+		row.CandidateRef,
+		row.BaselineRef,
+		row.GateVerdictJSON,
+		row.Action,
+		row.ActionRef,
+		caught,
+		row.BacklogPath,
+		row.SummaryPath,
+		row.CreatedAt.UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return fmt.Errorf("insert canary_run: %w", err)
 	}
 	return nil
 }

@@ -296,9 +296,9 @@ sources = ["scripts/skill_test_c4.sh", "cmd/**/*.go", "internal/**/*.go", "skill
 outputs = ["tmp/skill-test-c4.ok"]
 
 [tasks."skill:test:c5"]
-description = "Focused C5 suggest-miner guards"
+description = "Focused C5 prod-canary + dataset-tier guards"
 run = "./scripts/skill_test_c5.sh"
-sources = ["scripts/skill_test_c5.sh", "cmd/**/*.go", "internal/**/*.go", "skills/**/*.md", "skills/**/*.yaml", "skills/**/*.json"]
+sources = ["scripts/skill_test_c5.sh", "scripts/dset_lint.sh", "scripts/canary_snapshot.sh", "scripts/canary_run.sh", "scripts/canary_report.sh", "cmd/**/*.go", "internal/**/*.go", "dsets/**/*.jsonl", "skills/**/*.md", "skills/**/*.yaml", "skills/**/*.json"]
 outputs = ["tmp/skill-test-c5.ok"]
 
 [tasks."skill:test:c6"]
@@ -336,7 +336,7 @@ outputs = ["tmp/skill-sql-cert.ok", "tmp/skill-sql-cert-summary.json"]
 [tasks."ship:skills"]
 description = "Uncached skill lane certification (isolated from ship:core)"
 run = "./scripts/ship_skills.sh"
-sources = ["scripts/ship_skills.sh", "scripts/cleanup_audit.sh", "scripts/skill_docs_drift.sh", "scripts/skill_eval.sh", "scripts/skill_ab.sh", "scripts/skill_sql_cert.sh", "scripts/skill_test_core.sh", "scripts/skill_test_c2.sh", "scripts/skill_test_c3.sh", "scripts/skill_test_c4.sh", "scripts/skill_test_c5.sh", "scripts/skill_test_c6.sh", "cmd/**/*.go", "internal/**/*.go", "skills/**/*.md", "skills/**/*.yaml", "skills/**/*.json", "docs/**/*.md", "AGENTS.md", "spec-0/04-htn.jsonl", "package.json", "package-lock.json", "mise.toml"]
+sources = ["scripts/ship_skills.sh", "scripts/cleanup_audit.sh", "scripts/skill_docs_drift.sh", "scripts/skill_eval.sh", "scripts/skill_ab.sh", "scripts/skill_sql_cert.sh", "scripts/skill_test_core.sh", "scripts/skill_test_c2.sh", "scripts/skill_test_c3.sh", "scripts/skill_test_c4.sh", "scripts/skill_test_c5.sh", "scripts/skill_test_c6.sh", "scripts/dset_lint.sh", "scripts/canary_snapshot.sh", "scripts/canary_run.sh", "scripts/canary_report.sh", "cmd/**/*.go", "internal/**/*.go", "dsets/**/*.jsonl", "skills/**/*.md", "skills/**/*.yaml", "skills/**/*.json", "docs/**/*.md", "AGENTS.md", "spec-0/04-htn.jsonl", "spec-0/05-htn.jsonl", "package.json", "package-lock.json", "mise.toml"]
 outputs = ["tmp/ship-skills-summary.json", "tmp/skill-sql-cert.ok", "tmp/cleanup-audit.ok", "tmp/skill-test-c6.ok", "tmp/skill-docs-drift.ok"]
 
 [tasks.fmt]
