@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -225,37 +224,6 @@ func (s Service) Run(ctx context.Context, in Input) (Result, error) {
 		return Result{}, err
 	}
 	return Result{Judge: res, ScorePath: scorePath}, nil
-}
-
-type RunMeta struct {
-	Skill         string         `json:"skill"`
-	Fixture       string         `json:"fixture"`
-	Tool          string         `json:"tool"`
-	Deterministic bool           `json:"deterministic"`
-	Expect        map[string]any `json:"expect,omitempty"`
-	ToolCalls     int            `json:"tool_calls,omitempty"`
-	ExpectFiles   []string       `json:"expect_files,omitempty"`
-}
-
-func ReadRunMeta(runDir string) (RunMeta, error) {
-	b, err := os.ReadFile(filepath.Join(runDir, "skill-run.json"))
-	if err != nil {
-		return RunMeta{}, fmt.Errorf("read skill-run.json: %w", err)
-	}
-	var meta RunMeta
-	if err := json.Unmarshal(b, &meta); err != nil {
-		return RunMeta{}, fmt.Errorf("parse skill-run.json: %w", err)
-	}
-	if len(meta.ExpectFiles) == 0 && meta.Expect != nil {
-		if raw, ok := meta.Expect["files"].([]any); ok {
-			for _, v := range raw {
-				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-					meta.ExpectFiles = append(meta.ExpectFiles, strings.TrimSpace(s))
-				}
-			}
-		}
-	}
-	return meta, nil
 }
 
 func CriteriaMap(in []skilljudge.CriterionScore) map[string]float64 {

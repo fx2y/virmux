@@ -72,7 +72,7 @@ func cmdExport(args []string) error {
 		if out == "" {
 			out = filepath.Join(*runsDir, *evalID+".eval.tar.zst")
 		}
-		return exportEvalBundle(context.Background(), *dbPath, *evalID, out)
+		return exportEvalBundle(context.Background(), *dbPath, *runsDir, *evalID, out)
 	default:
 		return fmt.Errorf("unsupported export mode: %s", *mode)
 	}
@@ -160,7 +160,7 @@ func exportRunBundle(ctx context.Context, dbPath, runsDir, runID, outPath string
 	return nil
 }
 
-func exportEvalBundle(ctx context.Context, dbPath, evalID, outPath string) error {
+func exportEvalBundle(ctx context.Context, dbPath, runsDir, evalID, outPath string) error {
 	_ = ctx
 	st, err := store.Open(dbPath)
 	if err != nil {
@@ -168,6 +168,12 @@ func exportEvalBundle(ctx context.Context, dbPath, evalID, outPath string) error
 	}
 	defer st.Close()
 	db := st.DB()
+
+	runDir := filepath.Join(runsDir, evalID)
+	info, err := os.Stat(runDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 
 	tmpDir, err := os.MkdirTemp("", "virmux-export-eval-*")
 	if err != nil {
@@ -177,6 +183,11 @@ func exportEvalBundle(ctx context.Context, dbPath, evalID, outPath string) error
 	stage := filepath.Join(tmpDir, "bundle")
 	if err := os.MkdirAll(filepath.Join(stage, "db"), 0o755); err != nil {
 		return err
+	}
+	if err == nil && info != nil && info.IsDir() {
+		if err := copyTree(runDir, filepath.Join(stage, "run")); err != nil {
+			return err
+		}
 	}
 	if err := writeEvalSnapshots(db, evalID, filepath.Join(stage, "db")); err != nil {
 		return err
@@ -232,7 +243,20 @@ func importRunBundle(ctx context.Context, bundlePath, dbPath, runsDir string) er
 			return err
 		}
 		defer st.Close()
-		return importEvalSnapshotsIntoStore(st.DB(), stage)
+		if err := importEvalSnapshotsIntoStore(st.DB(), stage); err != nil {
+			return err
+		}
+		destRunDir := filepath.Join(runsDir, meta.EvalID)
+		if _, err := os.Lstat(destRunDir); err == nil {
+			// Skip copy if already exists
+			return nil
+		}
+		if _, err := os.Stat(filepath.Join(stage, "run")); err == nil {
+			if err := copyTree(filepath.Join(stage, "run"), destRunDir); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	destRunDir := filepath.Join(runsDir, meta.RunID)
 	if _, err := os.Lstat(destRunDir); err == nil {
@@ -301,13 +325,23 @@ func writeRunSnapshots(db *sql.DB, runID, outDir string) error {
 		runID); err != nil {
 		return err
 	}
+	task, _ := queryRunTask(db, runID)
+	if task == "skill:ab" {
+		if err := writeEvalSnapshots(db, runID, outDir); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 func writeEvalSnapshots(db *sql.DB, evalID, outDir string) error {
-	if err := snapshotRows(db, filepath.Join(outDir, "eval_runs.json"),
-		`SELECT id,skill,cohort,base_ref,head_ref,provider,fixtures_hash,cfg_sha256,cfg_path,results_sha256,results_path,verdict_sha256,verdict_path,score_p50_base,score_p50_head,fail_rate_base,fail_rate_head,cost_total_base,cost_total_head,score_p50_delta,fail_rate_delta,cost_delta,pass,verdict_json,created_at FROM eval_runs WHERE id=? ORDER BY id`,
-		evalID); err != nil {
+	// Include the primary eval_run and any curated_eval_run_id referenced by its canary runs.
+	q := `SELECT id,skill,cohort,base_ref,head_ref,provider,fixtures_hash,cfg_sha256,cfg_path,results_sha256,results_path,verdict_sha256,verdict_path,score_p50_base,score_p50_head,fail_rate_base,fail_rate_head,cost_total_base,cost_total_head,score_p50_delta,fail_rate_delta,cost_delta,pass,verdict_json,created_at 
+	      FROM eval_runs 
+	      WHERE id=? 
+	      OR id IN (SELECT curated_eval_run_id FROM canary_runs WHERE eval_run_id=? AND curated_eval_run_id != '')
+	      ORDER BY id`
+	if err := snapshotRows(db, filepath.Join(outDir, "eval_runs.json"), q, evalID, evalID); err != nil {
 		return err
 	}
 	if err := snapshotRows(db, filepath.Join(outDir, "eval_cases.json"),
@@ -740,122 +774,136 @@ func importSnapshotsIntoStore(db *sql.DB, stage, bundlePath string) error {
 			return fmt.Errorf("insert imported judge_run: %w", err)
 		}
 	}
-	for _, row := range refineRows {
-		if _, err := tx.Exec(`INSERT INTO refine_runs(id,run_id,skill,eval_run_id,branch,commit_sha,patch_hash,patch_path,pr_body_path,hunk_count,tools_edit,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-			str(row["id"]), str(row["run_id"]), str(row["skill"]), str(row["eval_run_id"]), str(row["branch"]),
-			str(row["commit_sha"]), str(row["patch_hash"]), str(row["patch_path"]), str(row["pr_body_path"]), numi(row["hunk_count"]), numi(row["tools_edit"]), str(row["created_at"])); err != nil {
-			return fmt.Errorf("insert imported refine_run: %w", err)
+		for _, row := range refineRows {
+			if _, err := tx.Exec(`INSERT INTO refine_runs(id,run_id,skill,eval_run_id,branch,commit_sha,patch_hash,patch_path,pr_body_path,hunk_count,tools_edit,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+				str(row["id"]), str(row["run_id"]), str(row["skill"]), str(row["eval_run_id"]), str(row["branch"]), str(row["commit_sha"]), str(row["patch_hash"]), str(row["patch_path"]), str(row["pr_body_path"]), numi(row["hunk_count"]), numi(row["tools_edit"]), str(row["created_at"])); err != nil {
+				return fmt.Errorf("insert imported refine_run: %w", err)
+			}
 		}
-	}
-	return tx.Commit()
-}
-
-func importEvalSnapshotsIntoStore(db *sql.DB, stage string) error {
-	evalRows, err := readSnapshotRows(filepath.Join(stage, "db", "eval_runs.json"))
-	if err != nil {
-		return err
-	}
-	if len(evalRows) != 1 {
-		return fmt.Errorf("bundle eval_runs.json must contain exactly 1 row")
-	}
-	evalCaseRows, err := readSnapshotRows(filepath.Join(stage, "db", "eval_cases.json"))
-	if err != nil {
-		return err
-	}
-	promoRows, err := readSnapshotRows(filepath.Join(stage, "db", "promotions.json"))
-	if err != nil {
-		return err
-	}
-	expRows, err := readSnapshotRows(filepath.Join(stage, "db", "experiments.json"))
-	if err != nil {
-		return err
-	}
-	compRows, err := readSnapshotRows(filepath.Join(stage, "db", "comparisons.json"))
-	if err != nil {
-		return err
-	}
-	canaryRows, err := readSnapshotRows(filepath.Join(stage, "db", "canary_runs.json"))
-	if err != nil {
-		return err
-	}
-	suggestRows, err := readSnapshotRows(filepath.Join(stage, "db", "suggest_runs.json"))
-	if err != nil {
-		return err
-	}
-
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	r := evalRows[0]
-	if _, err := tx.Exec(`INSERT INTO eval_runs(id,skill,cohort,base_ref,head_ref,provider,fixtures_hash,cfg_sha256,cfg_path,results_sha256,results_path,verdict_sha256,verdict_path,score_p50_base,score_p50_head,fail_rate_base,fail_rate_head,cost_total_base,cost_total_head,score_p50_delta,fail_rate_delta,cost_delta,pass,verdict_json,created_at)
-	VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		str(r["id"]), str(r["skill"]), str(r["cohort"]), str(r["base_ref"]), str(r["head_ref"]), str(r["provider"]), str(r["fixtures_hash"]),
-		str(r["cfg_sha256"]), str(r["cfg_path"]), str(r["results_sha256"]), str(r["results_path"]), str(r["verdict_sha256"]), str(r["verdict_path"]),
-		numf(r["score_p50_base"]), numf(r["score_p50_head"]), numf(r["fail_rate_base"]), numf(r["fail_rate_head"]), numf(r["cost_total_base"]), numf(r["cost_total_head"]),
-		numf(r["score_p50_delta"]), numf(r["fail_rate_delta"]), numf(r["cost_delta"]), numi(r["pass"]), str(r["verdict_json"]), str(r["created_at"])); err != nil {
-		return fmt.Errorf("insert imported eval_run: %w", err)
-	}
-	for _, row := range evalCaseRows {
-		if _, err := tx.Exec(`INSERT INTO eval_cases(eval_run_id,fixture_id,base_score,head_score,base_pass,head_pass,base_cost,head_cost,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
-			str(row["eval_run_id"]), str(row["fixture_id"]), numf(row["base_score"]), numf(row["head_score"]), numi(row["base_pass"]), numi(row["head_pass"]), numf(row["base_cost"]), numf(row["head_cost"]), str(row["created_at"])); err != nil {
-			return fmt.Errorf("insert imported eval_case: %w", err)
+	
+		task := str(r["task"])
+		if task == "skill:ab" {
+			if err := importEvalSnapshotsIntoTx(tx, stage); err != nil {
+				return err
+			}
 		}
+	
+		return tx.Commit()
 	}
-	for _, row := range promoRows {
-		var evalRunID sql.NullString
-		if v := str(row["eval_run_id"]); v != "" {
-			evalRunID = sql.NullString{String: v, Valid: true}
+	
+	func importEvalSnapshotsIntoStore(db *sql.DB, stage string) error {
+		tx, err := db.Begin()
+		if err != nil {
+			return err
 		}
-		if _, err := tx.Exec(`INSERT INTO promotions(id,skill,tag,base_ref,head_ref,from_ref,to_ref,reason,metrics_json,commit_sha,op,eval_run_id,verdict_sha256,actor,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			str(row["id"]), str(row["skill"]), str(row["tag"]), str(row["base_ref"]), str(row["head_ref"]), str(row["from_ref"]), str(row["to_ref"]),
-			str(row["reason"]), str(row["metrics_json"]), str(row["commit_sha"]), str(row["op"]), evalRunID, str(row["verdict_sha256"]), str(row["actor"]), str(row["created_at"])); err != nil {
-			return fmt.Errorf("insert imported promotion: %w", err)
+		defer tx.Rollback()
+		if err := importEvalSnapshotsIntoTx(tx, stage); err != nil {
+			return err
 		}
+		return tx.Commit()
 	}
-	for _, row := range expRows {
-		var evalRunID sql.NullString
-		if v := str(row["eval_run_id"]); v != "" {
-			evalRunID = sql.NullString{String: v, Valid: true}
+	
+	func importEvalSnapshotsIntoTx(tx *sql.Tx, stage string) error {
+		evalRows, err := readSnapshotRows(filepath.Join(stage, "db", "eval_runs.json"))
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
 		}
-		if _, err := tx.Exec(`INSERT INTO experiments(id,eval_run_id,skill,cohort,base_ref,head_ref,judge_mode,created_at) VALUES(?,?,?,?,?,?,?,?)`,
-			str(row["id"]), evalRunID, str(row["skill"]), str(row["cohort"]), str(row["base_ref"]), str(row["head_ref"]), str(row["judge_mode"]), str(row["created_at"])); err != nil {
-			return fmt.Errorf("insert imported experiment: %w", err)
+		evalCaseRows, err := readSnapshotRows(filepath.Join(stage, "db", "eval_cases.json"))
+		if err != nil {
+			return err
 		}
+		promoRows, err := readSnapshotRows(filepath.Join(stage, "db", "promotions.json"))
+		if err != nil {
+			return err
+		}
+		expRows, err := readSnapshotRows(filepath.Join(stage, "db", "experiments.json"))
+		if err != nil {
+			return err
+		}
+		compRows, err := readSnapshotRows(filepath.Join(stage, "db", "comparisons.json"))
+		if err != nil {
+			return err
+		}
+		canaryRows, err := readSnapshotRows(filepath.Join(stage, "db", "canary_runs.json"))
+		if err != nil {
+			return err
+		}
+		suggestRows, err := readSnapshotRows(filepath.Join(stage, "db", "suggest_runs.json"))
+		if err != nil {
+			return err
+		}
+	
+		for _, r := range evalRows {
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO eval_runs(id,skill,cohort,base_ref,head_ref,provider,fixtures_hash,cfg_sha256,cfg_path,results_sha256,results_path,verdict_sha256,verdict_path,score_p50_base,score_p50_head,fail_rate_base,fail_rate_head,cost_total_base,cost_total_head,score_p50_delta,fail_rate_delta,cost_delta,pass,verdict_json,created_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				str(r["id"]), str(r["skill"]), str(r["cohort"]), str(r["base_ref"]), str(r["head_ref"]), str(r["provider"]), str(r["fixtures_hash"]),
+				str(r["cfg_sha256"]), str(r["cfg_path"]), str(r["results_sha256"]), str(r["results_path"]), str(r["verdict_sha256"]), str(r["verdict_path"]),
+				numf(r["score_p50_base"]), numf(r["score_p50_head"]), numf(r["fail_rate_base"]), numf(r["fail_rate_head"]), numf(r["cost_total_base"]), numf(r["cost_total_head"]),
+				numf(r["score_p50_delta"]), numf(r["fail_rate_delta"]), numf(r["cost_delta"]), numi(r["pass"]), str(r["verdict_json"]), str(r["created_at"])); err != nil {
+				return fmt.Errorf("insert imported eval_run: %w", err)
+			}
+		}
+		for _, row := range evalCaseRows {
+			if _, err := tx.Exec(`INSERT INTO eval_cases(eval_run_id,fixture_id,base_score,head_score,base_pass,head_pass,base_cost,head_cost,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+				str(row["eval_run_id"]), str(row["fixture_id"]), numf(row["base_score"]), numf(row["head_score"]), numi(row["base_pass"]), numi(row["head_pass"]), numf(row["base_cost"]), numf(row["head_cost"]), str(row["created_at"])); err != nil {
+				return fmt.Errorf("insert imported eval_case: %w", err)
+			}
+		}
+		for _, row := range promoRows {
+			var evalRunID sql.NullString
+			if v := str(row["eval_run_id"]); v != "" {
+				evalRunID = sql.NullString{String: v, Valid: true}
+			}
+			if _, err := tx.Exec(`INSERT INTO promotions(id,skill,tag,base_ref,head_ref,from_ref,to_ref,reason,metrics_json,commit_sha,op,eval_run_id,verdict_sha256,actor,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				str(row["id"]), str(row["skill"]), str(row["tag"]), str(row["base_ref"]), str(row["head_ref"]), str(row["from_ref"]), str(row["to_ref"]),
+				str(row["reason"]), str(row["metrics_json"]), str(row["commit_sha"]), str(row["op"]), evalRunID, str(row["verdict_sha256"]), str(row["actor"]), str(row["created_at"])); err != nil {
+				return fmt.Errorf("insert imported promotion: %w", err)
+			}
+		}
+		for _, row := range expRows {
+			var evalRunID sql.NullString
+			if v := str(row["eval_run_id"]); v != "" {
+				evalRunID = sql.NullString{String: v, Valid: true}
+			}
+			if _, err := tx.Exec(`INSERT INTO experiments(id,eval_run_id,skill,cohort,base_ref,head_ref,judge_mode,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+				str(row["id"]), evalRunID, str(row["skill"]), str(row["cohort"]), str(row["base_ref"]), str(row["head_ref"]), str(row["judge_mode"]), str(row["created_at"])); err != nil {
+				return fmt.Errorf("insert imported experiment: %w", err)
+			}
+		}
+		for _, row := range compRows {
+			if _, err := tx.Exec(`INSERT INTO comparisons(experiment_id,fixture_id,winner,rationale,created_at) VALUES(?,?,?,?,?)`,
+				str(row["experiment_id"]), str(row["fixture_id"]), str(row["winner"]), str(row["rationale"]), str(row["created_at"])); err != nil {
+				return fmt.Errorf("insert imported comparison: %w", err)
+			}
+		}
+		for _, row := range canaryRows {
+			var curated sql.NullString
+			if v := str(row["curated_eval_run_id"]); v != "" {
+				curated = sql.NullString{String: v, Valid: true}
+			}
+			if _, err := tx.Exec(`INSERT INTO canary_runs(id,skill,eval_run_id,curated_eval_run_id,dset_path,dset_sha256,dset_count,candidate_ref,baseline_ref,gate_verdict_json,action,action_ref,caught_by_canary,backlog_path,summary_path,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				str(row["id"]), str(row["skill"]), str(row["eval_run_id"]), curated, str(row["dset_path"]), str(row["dset_sha256"]), numi(row["dset_count"]),
+				str(row["candidate_ref"]), str(row["baseline_ref"]), str(row["gate_verdict_json"]), str(row["action"]), str(row["action_ref"]), numi(row["caught_by_canary"]),
+				str(row["backlog_path"]), str(row["summary_path"]), str(row["created_at"])); err != nil {
+				return fmt.Errorf("insert imported canary_run: %w", err)
+			}
+		}
+		for _, row := range suggestRows {
+			var evalRunID sql.NullString
+			if v := str(row["eval_run_id"]); v != "" {
+				evalRunID = sql.NullString{String: v, Valid: true}
+			}
+			if _, err := tx.Exec(`INSERT INTO suggest_runs(id,skill,eval_run_id,motif_key,branch,commit_sha,pr_body_hash,pr_body_path,run_ids_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+				str(row["id"]), str(row["skill"]), evalRunID, str(row["motif_key"]), str(row["branch"]), str(row["commit_sha"]), str(row["pr_body_hash"]), str(row["pr_body_path"]), str(row["run_ids_json"]), str(row["created_at"])); err != nil {
+				return fmt.Errorf("insert imported suggest_run: %w", err)
+			}
+		}
+		return nil
 	}
-	for _, row := range compRows {
-		if _, err := tx.Exec(`INSERT INTO comparisons(experiment_id,fixture_id,winner,rationale,created_at) VALUES(?,?,?,?,?)`,
-			str(row["experiment_id"]), str(row["fixture_id"]), str(row["winner"]), str(row["rationale"]), str(row["created_at"])); err != nil {
-			return fmt.Errorf("insert imported comparison: %w", err)
-		}
-	}
-	for _, row := range canaryRows {
-		var curated sql.NullString
-		if v := str(row["curated_eval_run_id"]); v != "" {
-			curated = sql.NullString{String: v, Valid: true}
-		}
-		if _, err := tx.Exec(`INSERT INTO canary_runs(id,skill,eval_run_id,curated_eval_run_id,dset_path,dset_sha256,dset_count,candidate_ref,baseline_ref,gate_verdict_json,action,action_ref,caught_by_canary,backlog_path,summary_path,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			str(row["id"]), str(row["skill"]), str(row["eval_run_id"]), curated, str(row["dset_path"]), str(row["dset_sha256"]), numi(row["dset_count"]),
-			str(row["candidate_ref"]), str(row["baseline_ref"]), str(row["gate_verdict_json"]), str(row["action"]), str(row["action_ref"]), numi(row["caught_by_canary"]),
-			str(row["backlog_path"]), str(row["summary_path"]), str(row["created_at"])); err != nil {
-			return fmt.Errorf("insert imported canary_run: %w", err)
-		}
-	}
-	for _, row := range suggestRows {
-		var evalRunID sql.NullString
-		if v := str(row["eval_run_id"]); v != "" {
-			evalRunID = sql.NullString{String: v, Valid: true}
-		}
-		if _, err := tx.Exec(`INSERT INTO suggest_runs(id,skill,eval_run_id,motif_key,branch,commit_sha,pr_body_hash,pr_body_path,run_ids_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-			str(row["id"]), str(row["skill"]), evalRunID, str(row["motif_key"]), str(row["branch"]), str(row["commit_sha"]), str(row["pr_body_hash"]),
-			str(row["pr_body_path"]), str(row["run_ids_json"]), str(row["created_at"])); err != nil {
-			return fmt.Errorf("insert imported suggest_run: %w", err)
-		}
-	}
-	return tx.Commit()
-}
+	
 
 func readSnapshotRows(path string) ([]map[string]any, error) {
 	var rows []map[string]any

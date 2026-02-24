@@ -75,6 +75,7 @@ type Metrics struct {
 	Fails     int     `json:"fails"`
 	FailRate  float64 `json:"fail_rate"`
 	ScoreP50  float64 `json:"score_p50"`
+	ScoreP90  float64 `json:"score_p90"`
 	CostTotal float64 `json:"cost_total"`
 }
 
@@ -273,6 +274,7 @@ func ParsePromptfooResults(raw []byte, fixtureIDs []string) (Metrics, map[string
 		Fails:     fails,
 		FailRate:  failRate,
 		ScoreP50:  median(scores),
+		ScoreP90:  percentile(scores, 90),
 		CostTotal: cost,
 	}, caseMap, nil
 }
@@ -451,6 +453,27 @@ func floatFromAny(v any) float64 {
 	default:
 		return 0
 	}
+}
+
+func percentile(xs []float64, p float64) float64 {
+	if len(xs) == 0 {
+		return 0
+	}
+	cp := append([]float64(nil), xs...)
+	sort.Float64s(cp)
+	if p <= 0 {
+		return cp[0]
+	}
+	if p >= 100 {
+		return cp[len(cp)-1]
+	}
+	idx := p / 100.0 * float64(len(cp)-1)
+	i := int(idx)
+	fraction := idx - float64(i)
+	if i+1 < len(cp) {
+		return cp[i] + fraction*(cp[i+1]-cp[i])
+	}
+	return cp[i]
 }
 
 func median(xs []float64) float64 {

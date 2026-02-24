@@ -462,10 +462,10 @@ func TestExportImportEvalBundleRoundTrip(t *testing.T) {
 
 	b1 := filepath.Join(tmp, "eval1.tar.zst")
 	b2 := filepath.Join(tmp, "eval2.tar.zst")
-	if err := exportEvalBundle(context.Background(), dbPath, evalID, b1); err != nil {
+	if err := exportEvalBundle(context.Background(), dbPath, runsDir, evalID, b1); err != nil {
 		t.Fatalf("export eval #1: %v", err)
 	}
-	if err := exportEvalBundle(context.Background(), dbPath, evalID, b2); err != nil {
+	if err := exportEvalBundle(context.Background(), dbPath, runsDir, evalID, b2); err != nil {
 		t.Fatalf("export eval #2: %v", err)
 	}
 	raw1, err := os.ReadFile(b1)
