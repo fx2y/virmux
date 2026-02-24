@@ -221,6 +221,26 @@ func TestStoreSchemaAndFK(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("insert canary_run: %v", err)
 	}
+
+	evID, err := s.InsertEvidence(ctx, Evidence{
+		RunID:      run.ID,
+		Claim:      "AI is cool",
+		URL:        "https://example.com",
+		TS:         time.Now(),
+		SourceHash: "sha256:source",
+	})
+	if err != nil {
+		t.Fatalf("insert evidence: %v", err)
+	}
+	if err := s.InsertRowEvidence(ctx, RowEvidence{
+		RunID:      run.ID,
+		TrackID:    "T1",
+		RowIdx:     0,
+		EvidenceID: evID,
+	}); err != nil {
+		t.Fatalf("insert row_evidence: %v", err)
+	}
+
 	var idxCount int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_artifacts_run_id'`).Scan(&idxCount); err != nil {
 		t.Fatalf("query artifacts index: %v", err)
@@ -299,6 +319,18 @@ func TestStoreSchemaAndFK(t *testing.T) {
 	}
 	if idxCount != 1 {
 		t.Fatalf("expected idx_canary_runs_eval_run, got %d", idxCount)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_evidence_run_id'`).Scan(&idxCount); err != nil {
+		t.Fatalf("query evidence index: %v", err)
+	}
+	if idxCount != 1 {
+		t.Fatalf("expected idx_evidence_run_id, got %d", idxCount)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_row_evidence_run_track'`).Scan(&idxCount); err != nil {
+		t.Fatalf("query row_evidence index: %v", err)
+	}
+	if idxCount != 1 {
+		t.Fatalf("expected idx_row_evidence_run_track, got %d", idxCount)
 	}
 }
 

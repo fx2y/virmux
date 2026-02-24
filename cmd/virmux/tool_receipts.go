@@ -99,7 +99,7 @@ func extraRunArtifactPaths(paths []string) []string {
 	}
 	var out []string
 	for runDir := range runDirs {
-		for _, rel := range []string{"toolio", "artifacts"} {
+		for _, rel := range []string{"toolio", "artifacts", "map", "reduce"} {
 			root := filepath.Join(runDir, rel)
 			if _, err := os.Lstat(root); err != nil {
 				continue

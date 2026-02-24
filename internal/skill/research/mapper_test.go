@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/haris/virmux/internal/store"
 	yaml "gopkg.in/yaml.v2"
 )
 
@@ -18,11 +20,19 @@ func TestMapperRun(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
+	dbPath := filepath.Join(tmpDir, "virmux.sqlite")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
 	runID := "test-run"
 	runDir := filepath.Join(tmpDir, runID)
 	if err := os.MkdirAll(runDir, 0755); err != nil {
 		t.Fatal(err)
 	}
+	st.StartRun(context.Background(), store.Run{ID: runID, Task: "test", StartedAt: time.Now()})
 
 	plan := &Plan{
 		PlanID: "test-plan",
@@ -37,7 +47,7 @@ func TestMapperRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mapper := &DefaultMapper{RunsDir: tmpDir}
+	mapper := &DefaultMapper{RunsDir: tmpDir, Store: st}
 	_, err = mapper.Run(context.Background(), MapInput{RunID: runID, TrackID: "T1"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -67,9 +77,14 @@ func TestMapperWide(t *testing.T) {
 	tmpDir, _ := os.MkdirTemp("", "virmux-mapper-wide-*")
 	defer os.RemoveAll(tmpDir)
 
+	dbPath := filepath.Join(tmpDir, "virmux.sqlite")
+	st, _ := store.Open(dbPath)
+	defer st.Close()
+
 	runID := "wide-run"
 	runDir := filepath.Join(tmpDir, runID)
 	os.MkdirAll(runDir, 0755)
+	st.StartRun(context.Background(), store.Run{ID: runID, Task: "test", StartedAt: time.Now()})
 
 	plan := &Plan{
 		PlanID: "wide-plan",
@@ -87,7 +102,7 @@ func TestMapperWide(t *testing.T) {
 	planData, _ := yaml.Marshal(plan)
 	os.WriteFile(filepath.Join(runDir, "plan.yaml"), planData, 0644)
 
-	mapper := &DefaultMapper{RunsDir: tmpDir}
+	mapper := &DefaultMapper{RunsDir: tmpDir, Store: st}
 	// Test first run (no cache)
 	_, err := mapper.Run(context.Background(), MapInput{RunID: runID, TrackID: "W1"})
 	if err != nil {

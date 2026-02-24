@@ -403,7 +403,7 @@ type skillFingerprints struct {
 }
 
 func wrapSkillRunner(inner vmRunner, skillDef skillspec.Skill, fp skillFingerprints, skillRef, fixturePath string, fx skillrun.Fixture) vmRunner {
-	return func(ctx context.Context, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
+	return func(ctx context.Context, st *store.Store, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
 		details := map[string]any{}
 		if err := emitVM("skill.run.selected", map[string]any{
 			"skill":      skillDef.Meta.Name,
@@ -426,7 +426,7 @@ func wrapSkillRunner(inner vmRunner, skillDef skillspec.Skill, fp skillFingerpri
 		if scoreErr == nil {
 			details["score_path"] = scorePath
 		}
-		outcome, innerDetails, runErr := inner(ctx, art, meta, runDir, emitVM)
+		outcome, innerDetails, runErr := inner(ctx, st, art, meta, runDir, emitVM)
 		for k, v := range innerDetails {
 			details[k] = v
 		}

@@ -11,16 +11,19 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/haris/virmux/internal/store"
 	yaml "gopkg.in/yaml.v2"
 )
 
 type MapResultRow struct {
-	TrackID    string         `json:"track_id"`
-	OK         bool           `json:"ok"`
-	Data       map[string]any `json:"data,omitempty"`
-	Error      string         `json:"error,omitempty"`
-	Evidence   []string       `json:"evidence,omitempty"`
+	TrackID     string         `json:"track_id"`
+	OK          bool           `json:"ok"`
+	Data        map[string]any `json:"data,omitempty"`
+	Error       string         `json:"error,omitempty"`
+	Evidence    []string       `json:"evidence,omitempty"`
+	EvidenceIDs []int64        `json:"evidence_ids,omitempty"`
 }
 
 type MapTrackOutput struct {
@@ -62,6 +65,7 @@ type CacheEntry struct {
 type DefaultMapper struct {
 	RunsDir  string
 	CacheDir string
+	Store    *store.Store
 	Cache    sync.Map // (query_hash+url) -> CacheEntry (in-memory overlay)
 }
 
@@ -103,6 +107,39 @@ func (m *DefaultMapper) Run(ctx context.Context, input MapInput) (MapOutput, err
 	}
 	if err != nil {
 		return MapOutput{}, err
+	}
+
+	// 3.5 Resolve and Link Evidence
+	if m.Store != nil {
+		for i := range output.Rows {
+			row := &output.Rows[i]
+			for _, evStr := range row.Evidence {
+				// Simple heuristic: if it looks like a URL, use it as URL, otherwise as claim
+				claim := "Claim from " + row.TrackID
+				url := ""
+				if strings.HasPrefix(evStr, "http") {
+					url = evStr
+				} else {
+					claim = evStr
+				}
+				evID, err := m.Store.InsertEvidence(ctx, store.Evidence{
+					RunID:      input.RunID,
+					Claim:      claim,
+					URL:        url,
+					TS:         time.Now(),
+					SourceHash: m.getCacheKey(evStr, ""),
+				})
+				if err == nil {
+					row.EvidenceIDs = append(row.EvidenceIDs, evID)
+					_ = m.Store.InsertRowEvidence(ctx, store.RowEvidence{
+						RunID:      input.RunID,
+						TrackID:    row.TrackID,
+						RowIdx:     i,
+						EvidenceID: evID,
+					})
+				}
+			}
+		}
 	}
 
 	// 4. Write runs/<id>/map/<track>.jsonl
@@ -182,6 +219,9 @@ func (m *DefaultMapper) runWideTrack(ctx context.Context, track *Track) (MapTrac
 			OK:      true,
 			Data:    map[string]any{"target": cell.Target, "attr": cell.Attr, "result": fmt.Sprintf("result for %s", cellID)},
 		}
+		if ledger.Completed%3 != 0 {
+			row.Evidence = []string{fmt.Sprintf("https://example.com/source/%s", cellID)}
+		}
 		output.Rows = append(output.Rows, row)
 		ledger.Completed++
 		ledger.CellStatus[cellID] = "found"
@@ -197,9 +237,10 @@ func (m *DefaultMapper) runDeepTrack(ctx context.Context, track *Track) (MapTrac
 		TrackID: track.ID,
 		Rows: []MapResultRow{
 			{
-				TrackID: track.ID,
-				OK:      true,
-				Data:    map[string]any{"result": fmt.Sprintf("stub result for %s", track.Q)},
+				TrackID:  track.ID,
+				OK:       true,
+				Data:     map[string]any{"result": fmt.Sprintf("stub result for %s", track.Q)},
+				Evidence: []string{"https://example.com/deep/result"},
 			},
 		},
 	}, nil

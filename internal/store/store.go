@@ -213,6 +213,25 @@ type CanaryRun struct {
 	CreatedAt        time.Time
 }
 
+type Evidence struct {
+	ID         int64
+	RunID      string
+	Claim      string
+	URL        string
+	QuoteSpan  string
+	TS         time.Time
+	Confidence float64
+	SourceHash string
+}
+
+type RowEvidence struct {
+	ID         int64
+	RunID      string
+	TrackID    string
+	RowIdx     int
+	EvidenceID int64
+}
+
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create db dir: %w", err)
@@ -438,6 +457,26 @@ CREATE TABLE IF NOT EXISTS comparisons (
   created_at TEXT NOT NULL,
   FOREIGN KEY(experiment_id) REFERENCES experiments(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS evidence (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  claim TEXT NOT NULL,
+  url TEXT NOT NULL,
+  quote_span TEXT NOT NULL DEFAULT '',
+  ts TEXT NOT NULL,
+  confidence REAL NOT NULL DEFAULT 0,
+  source_hash TEXT NOT NULL,
+  FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS row_evidence (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  track_id TEXT NOT NULL,
+  row_idx INTEGER NOT NULL,
+  evidence_id INTEGER NOT NULL,
+  FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE,
+  FOREIGN KEY(evidence_id) REFERENCES evidence(id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS canary_runs (
   id TEXT PRIMARY KEY,
   skill TEXT NOT NULL,
@@ -473,6 +512,8 @@ CREATE INDEX IF NOT EXISTS idx_promotions_skill_created ON promotions(skill,crea
 CREATE INDEX IF NOT EXISTS idx_refine_runs_run_created ON refine_runs(run_id,created_at);
 CREATE INDEX IF NOT EXISTS idx_refine_runs_skill_created ON refine_runs(skill,created_at);
 CREATE INDEX IF NOT EXISTS idx_comparisons_experiment_fixture ON comparisons(experiment_id, fixture_id);
+CREATE INDEX IF NOT EXISTS idx_evidence_run_id ON evidence(run_id);
+CREATE INDEX IF NOT EXISTS idx_row_evidence_run_track ON row_evidence(run_id, track_id, row_idx);
 `
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("ensure schema: %w", err)
@@ -1027,6 +1068,39 @@ func (s *Store) InsertCanaryRun(ctx context.Context, row CanaryRun) error {
 	)
 	if err != nil {
 		return fmt.Errorf("insert canary_run: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) InsertEvidence(ctx context.Context, row Evidence) (int64, error) {
+	res, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO evidence(run_id,claim,url,quote_span,ts,confidence,source_hash) VALUES(?,?,?,?,?,?,?)`,
+		row.RunID,
+		row.Claim,
+		row.URL,
+		row.QuoteSpan,
+		row.TS.UTC().Format(time.RFC3339Nano),
+		row.Confidence,
+		row.SourceHash,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("insert evidence: %w", err)
+	}
+	return res.LastInsertId()
+}
+
+func (s *Store) InsertRowEvidence(ctx context.Context, row RowEvidence) error {
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO row_evidence(run_id,track_id,row_idx,evidence_id) VALUES(?,?,?,?)`,
+		row.RunID,
+		row.TrackID,
+		row.RowIdx,
+		row.EvidenceID,
+	)
+	if err != nil {
+		return fmt.Errorf("insert row_evidence: %w", err)
 	}
 	return nil
 }

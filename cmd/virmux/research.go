@@ -10,6 +10,7 @@ import (
 
 	"github.com/haris/virmux/internal/agent"
 	"github.com/haris/virmux/internal/skill/research"
+	"github.com/haris/virmux/internal/store"
 	"github.com/haris/virmux/internal/vm"
 	yaml "gopkg.in/yaml.v2"
 )
@@ -23,9 +24,105 @@ func cmdResearch(args []string) error {
 		return cmdResearchPlan(args[1:])
 	case "map":
 		return cmdResearchMap(args[1:])
+	case "reduce":
+		return cmdResearchReduce(args[1:])
+	case "run":
+		return cmdResearchRun(args[1:])
 	default:
 		return fmt.Errorf("unknown research subcommand: %s", args[0])
 	}
+}
+
+func cmdResearchRun(args []string) error {
+	fs, cfg, timeoutSec := commonFlags("research run")
+	query := fs.String("query", "", "research query")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *query == "" && fs.NArg() > 0 {
+		*query = fs.Arg(0)
+	}
+	if *query == "" {
+		return errors.New("query required")
+	}
+	cfg.timeout = timeDuration(*timeoutSec)
+
+	cacheDir := filepath.Join(os.Getenv("HOME"), ".cache", "virmux", "research")
+
+	return runWithStore(cfg, "research:run", map[string]any{"query": *query}, func(ctx context.Context, st *store.Store, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
+		// 1. Plan
+		planner := &research.DefaultPlanner{Hints: &research.DefaultHintProvider{}}
+		planOutput, err := planner.Compile(ctx, research.PlanInput{Query: *query})
+		if err != nil {
+			return vm.Outcome{}, nil, fmt.Errorf("planner: %w", err)
+		}
+		planData, _ := yaml.Marshal(planOutput.Plan)
+		if err := os.WriteFile(filepath.Join(runDir, "plan.yaml"), planData, 0644); err != nil {
+			return vm.Outcome{}, nil, err
+		}
+		_ = emitVM("research.plan.created", map[string]any{"plan_id": planOutput.PlanID, "path": "plan.yaml"})
+
+		// 2. Map
+		mapper := &research.DefaultMapper{RunsDir: cfg.runsDir, CacheDir: cacheDir, Store: st}
+		scheduler := &research.DefaultScheduler{
+			Mapper: mapper,
+			Emitter: func(event string, payload map[string]any) error {
+				return emitVM(event, payload)
+			},
+		}
+		runID := filepath.Base(runDir)
+		_, err = scheduler.Run(ctx, planOutput.Plan, runID)
+		if err != nil {
+			return vm.Outcome{}, nil, fmt.Errorf("scheduler: %w", err)
+		}
+
+		// 3. Reduce
+		reducer := &research.DefaultReducer{RunsDir: cfg.runsDir, Store: st}
+		_, err = reducer.Run(ctx, research.ReduceInput{RunID: runID})
+		if err != nil {
+			return vm.Outcome{}, nil, fmt.Errorf("reducer: %w", err)
+		}
+
+		return vm.Outcome{}, map[string]any{
+			"plan_id":    planOutput.PlanID,
+			"reduce_dir": filepath.Join(runDir, "reduce"),
+		}, nil
+	}, defaultRunRuntime)
+}
+
+func cmdResearchReduce(args []string) error {
+	fs, cfg, _ := commonFlags("research reduce")
+	runID := fs.String("run", "", "run id to reduce (last one if empty)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *runID == "" {
+		latest, err := findLatestRunDir(cfg.runsDir)
+		if err != nil {
+			return err
+		}
+		*runID = filepath.Base(latest)
+	}
+
+	return runWithStore(cfg, "research:reduce", map[string]any{"target_run_id": *runID}, func(ctx context.Context, st *store.Store, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
+		reducer := &research.DefaultReducer{
+			RunsDir: cfg.runsDir,
+			Store:   st,
+		}
+
+		output, err := reducer.Run(ctx, research.ReduceInput{RunID: *runID})
+		if err != nil {
+			return vm.Outcome{}, nil, fmt.Errorf("reducer run: %w", err)
+		}
+
+		// Prepare summary details
+		details := map[string]any{
+			"run_id": output.RunID,
+			"reduce_dir": filepath.Join(cfg.runsDir, *runID, "reduce"),
+		}
+
+		return vm.Outcome{}, details, nil
+	}, defaultRunRuntime)
 }
 
 func cmdResearchMap(args []string) error {
@@ -44,7 +141,7 @@ func cmdResearchMap(args []string) error {
 
 	cacheDir := filepath.Join(os.Getenv("HOME"), ".cache", "virmux", "research")
 
-	return runWithStore(cfg, "research:map", map[string]any{"target_run_id": *runID}, func(ctx context.Context, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
+	return runWithStore(cfg, "research:map", map[string]any{"target_run_id": *runID}, func(ctx context.Context, st *store.Store, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
 		// 1. Load plan.yaml from runs/<runID>/plan.yaml
 		planPath := filepath.Join(cfg.runsDir, *runID, "plan.yaml")
 		data, err := os.ReadFile(planPath)
@@ -60,6 +157,7 @@ func cmdResearchMap(args []string) error {
 		mapper := &research.DefaultMapper{
 			RunsDir:  cfg.runsDir,
 			CacheDir: cacheDir,
+			Store:    st,
 		}
 		scheduler := &research.DefaultScheduler{
 			Mapper: mapper,
@@ -129,7 +227,7 @@ func cmdResearchPlan(args []string) error {
 		Hints: &research.DefaultHintProvider{},
 	}
 
-	err := runWithStore(cfg, "research:plan", map[string]any{"query": *query}, func(ctx context.Context, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
+	err := runWithStore(cfg, "research:plan", map[string]any{"query": *query}, func(ctx context.Context, st *store.Store, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
 		output, err := planner.Compile(ctx, research.PlanInput{Query: *query})
 		if err != nil {
 			return vm.Outcome{}, nil, err

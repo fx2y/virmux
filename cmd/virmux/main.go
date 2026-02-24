@@ -135,7 +135,7 @@ func parseVMRunArgs(name string, args []string, defaultCmd string) (*runCommon, 
 }
 
 func newVMRunRunner(cfg *runCommon, command string, requiredMarkers []string) vmRunner {
-	return func(ctx context.Context, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
+	return func(ctx context.Context, st *store.Store, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
 		var emitErr error
 		trStats := transportStats{}
 		toolSucceeded := false
@@ -538,7 +538,7 @@ func cmdVMZygote(args []string) error {
 	}
 	cfg.timeout = time.Duration(*timeoutSec) * time.Second
 
-	return runWithStore(cfg, "vm:zygote", map[string]any{"label": cfg.label}, func(ctx context.Context, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
+	return runWithStore(cfg, "vm:zygote", map[string]any{"label": cfg.label}, func(ctx context.Context, st *store.Store, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
 		base := *snapshotDir
 		if base == "" {
 			repoRoot := filepath.Dir(filepath.Dir(cfg.imagesLock))
@@ -587,7 +587,7 @@ func cmdVMResume(args []string) error {
 	}
 	cfg.timeout = time.Duration(*timeoutSec) * time.Second
 
-	return runWithStore(cfg, "vm:resume", map[string]any{"label": cfg.label}, func(ctx context.Context, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
+	return runWithStore(cfg, "vm:resume", map[string]any{"label": cfg.label}, func(ctx context.Context, st *store.Store, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
 		base := *snapshotDir
 		if base == "" {
 			repoRoot := filepath.Dir(filepath.Dir(cfg.imagesLock))
@@ -638,7 +638,7 @@ func cmdVMResume(args []string) error {
 }
 
 type vmEventEmitter func(event string, payload map[string]any) error
-type vmRunner func(ctx context.Context, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error)
+type vmRunner func(ctx context.Context, st *store.Store, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error)
 
 func prepareRunFiles(runDir, runID, task string, started time.Time) (string, string, string, error) {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
@@ -738,7 +738,7 @@ func runWithStore(cfg *runCommon, task string, startedPayload map[string]any, ru
 		return err
 	}
 
-	outcome, details, runErr := runner(ctx, art, meta, runDir, func(event string, payload map[string]any) error {
+	outcome, details, runErr := runner(ctx, st, art, meta, runDir, func(event string, payload map[string]any) error {
 		return emit(ctx, st, tw, runID, task, event, payload, runtime.now)
 	})
 	status := "ok"
