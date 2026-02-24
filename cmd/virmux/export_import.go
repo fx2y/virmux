@@ -325,6 +325,16 @@ func writeRunSnapshots(db *sql.DB, runID, outDir string) error {
 		runID); err != nil {
 		return err
 	}
+	if err := snapshotRows(db, filepath.Join(outDir, "evidence.json"),
+		`SELECT id,run_id,claim,url,quote_span,ts,confidence,source_hash FROM evidence WHERE run_id=? ORDER BY id`,
+		runID); err != nil {
+		return err
+	}
+	if err := snapshotRows(db, filepath.Join(outDir, "row_evidence.json"),
+		`SELECT id,run_id,track_id,row_idx,evidence_id FROM row_evidence WHERE run_id=? ORDER BY id`,
+		runID); err != nil {
+		return err
+	}
 	task, _ := queryRunTask(db, runID)
 	if task == "skill:ab" {
 		if err := writeEvalSnapshots(db, runID, outDir); err != nil {
@@ -682,6 +692,8 @@ func importSnapshotsIntoStore(db *sql.DB, stage, bundlePath string) error {
 	var scoreRows []map[string]any
 	var judgeRows []map[string]any
 	var refineRows []map[string]any
+	var evidenceRows []map[string]any
+	var rowEvidenceRows []map[string]any
 	if err := readJSONFile(filepath.Join(stage, "db", "runs.json"), &runsRows); err != nil {
 		return err
 	}
@@ -705,6 +717,18 @@ func importSnapshotsIntoStore(db *sql.DB, stage, bundlePath string) error {
 			return err
 		}
 		refineRows = nil
+	}
+	if err := readJSONFile(filepath.Join(stage, "db", "evidence.json"), &evidenceRows); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		evidenceRows = nil
+	}
+	if err := readJSONFile(filepath.Join(stage, "db", "row_evidence.json"), &rowEvidenceRows); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		rowEvidenceRows = nil
 	}
 	if len(runsRows) != 1 {
 		return fmt.Errorf("bundle runs.json must contain exactly 1 row")
@@ -778,6 +802,18 @@ func importSnapshotsIntoStore(db *sql.DB, stage, bundlePath string) error {
 			if _, err := tx.Exec(`INSERT INTO refine_runs(id,run_id,skill,eval_run_id,branch,commit_sha,patch_hash,patch_path,pr_body_path,hunk_count,tools_edit,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
 				str(row["id"]), str(row["run_id"]), str(row["skill"]), str(row["eval_run_id"]), str(row["branch"]), str(row["commit_sha"]), str(row["patch_hash"]), str(row["patch_path"]), str(row["pr_body_path"]), numi(row["hunk_count"]), numi(row["tools_edit"]), str(row["created_at"])); err != nil {
 				return fmt.Errorf("insert imported refine_run: %w", err)
+			}
+		}
+		for _, row := range evidenceRows {
+			if _, err := tx.Exec(`INSERT INTO evidence(id,run_id,claim,url,quote_span,ts,confidence,source_hash) VALUES(?,?,?,?,?,?,?,?)`,
+				numi(row["id"]), str(row["run_id"]), str(row["claim"]), str(row["url"]), str(row["quote_span"]), str(row["ts"]), numf(row["confidence"]), str(row["source_hash"])); err != nil {
+				return fmt.Errorf("insert imported evidence: %w", err)
+			}
+		}
+		for _, row := range rowEvidenceRows {
+			if _, err := tx.Exec(`INSERT INTO row_evidence(id,run_id,track_id,row_idx,evidence_id) VALUES(?,?,?,?,?)`,
+				numi(row["id"]), str(row["run_id"]), str(row["track_id"]), numi(row["row_idx"]), numi(row["evidence_id"])); err != nil {
+				return fmt.Errorf("insert imported row_evidence: %w", err)
 			}
 		}
 	
