@@ -3,6 +3,21 @@ set -euo pipefail
 
 root="$(git rev-parse --show-toplevel)"
 cd "$root"
+cert_ts=""
+cert_id=""
+
+usage() {
+  echo "usage: scripts/research_portability.sh [--cert-ts <RFC3339>] [--cert-id <id>]" >&2
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --cert-ts) cert_ts="$2"; shift 2 ;;
+    --cert-id) cert_id="$2"; shift 2 ;;
+    *) usage ;;
+  esac
+done
 
 echo "--- Research Portability Test Started ---"
 
@@ -58,4 +73,8 @@ rows_artifacts="$(sqlite3 runs/virmux.sqlite "SELECT COUNT(*) FROM artifacts WHE
 
 echo "--- Research Portability Test PASSED ---"
 rm run_output.json "$BUNDLE"
-date -u +%FT%TZ > tmp/research-portability.ok
+marker_ts="$cert_ts"
+if [[ -z "$marker_ts" ]]; then
+  marker_ts="$(date -u +%FT%TZ)"
+fi
+jq -n --arg cert_id "$cert_id" --arg cert_ts "$marker_ts" '{cert_id:$cert_id,cert_ts:$cert_ts}' > tmp/research-portability.ok

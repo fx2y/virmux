@@ -5,9 +5,10 @@ root="$(git rev-parse --show-toplevel)"
 db="$root/runs/virmux.sqlite"
 label_glob='research-cert-%'
 cert_ts=""
+cert_id=""
 
 usage() {
-  echo "usage: scripts/research_sql_cert.sh [--db <path>] [--label-glob <glob>] [--cert-ts <RFC3339>]" >&2
+  echo "usage: scripts/research_sql_cert.sh [--db <path>] [--label-glob <glob>] [--cert-ts <RFC3339>] [--cert-id <id>]" >&2
   exit 1
 }
 
@@ -16,6 +17,7 @@ while [[ $# -gt 0 ]]; do
     --db) db="$2"; shift 2 ;;
     --label-glob) label_glob="$2"; shift 2 ;;
     --cert-ts) cert_ts="$2"; shift 2 ;;
+    --cert-id) cert_id="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
@@ -61,5 +63,9 @@ jq -n \
   '{cert_ts:$cert_ts,label_glob:$label,research_run_count:($run|tonumber),research_reduce_count:($reduce|tonumber),research_replay_count:($replay|tonumber),evidence_count:($evidence|tonumber),artifacts_count:($artifacts|tonumber),reports_count:($reports|tonumber)}' \
   > "$root/tmp/research-sql-cert-summary.json"
 
-date -u +%FT%TZ > "$root/tmp/research-sql-cert.ok"
+marker_ts="$cert_ts"
+if [[ -z "$marker_ts" ]]; then
+  marker_ts="$(date -u +%FT%TZ)"
+fi
+jq -n --arg cert_id "$cert_id" --arg cert_ts "$marker_ts" '{cert_id:$cert_id,cert_ts:$cert_ts}' > "$root/tmp/research-sql-cert.ok"
 echo "research:sql-cert: OK"

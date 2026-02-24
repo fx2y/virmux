@@ -3,6 +3,21 @@ set -euo pipefail
 
 root="$(git rev-parse --show-toplevel)"
 cd "$root"
+cert_ts=""
+cert_id=""
+
+usage() {
+  echo "usage: scripts/research_docs_drift.sh [--cert-ts <RFC3339>] [--cert-id <id>]" >&2
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --cert-ts) cert_ts="$2"; shift 2 ;;
+    --cert-id) cert_id="$2"; shift 2 ;;
+    *) usage ;;
+  esac
+done
 
 docs=(
   "docs/ops/spec06-card.md"
@@ -46,5 +61,9 @@ rg -n "virmux research replay" docs/ops/spec06-rollback-playbook.md >/dev/null |
 }
 
 mkdir -p "$root/tmp"
-date -u +%FT%TZ > "$root/tmp/research-docs-drift.ok"
+marker_ts="$cert_ts"
+if [[ -z "$marker_ts" ]]; then
+  marker_ts="$(date -u +%FT%TZ)"
+fi
+jq -n --arg cert_id "$cert_id" --arg cert_ts "$marker_ts" '{cert_id:$cert_id,cert_ts:$cert_ts}' > "$root/tmp/research-docs-drift.ok"
 echo "research:docs-drift: OK"

@@ -353,8 +353,8 @@ outputs = ["tmp/research-cert.ok"]
 
 [tasks."ship:research"]
 description = "Uncached research lane certification"
-run = "./scripts/research_cert.sh"
-sources = ["scripts/research_cert.sh", "cmd/virmux/research.go", "internal/skill/research/**/*.go", "spec-0/06-htn.jsonl"]
+run = "./scripts/ship_research.sh"
+sources = ["scripts/ship_research.sh", "scripts/research_cert.sh", "scripts/research_sql_cert.sh", "scripts/research_docs_drift.sh", "scripts/research_portability.sh", "scripts/spec06_dod_matrix.sh", "scripts/cleanup_audit.sh", "cmd/virmux/research.go", "internal/skill/research/**/*.go", "spec-0/06-htn.jsonl", "mise.toml"]
 outputs = ["tmp/ship-research-summary.json"]
 
 [tasks.fmt]

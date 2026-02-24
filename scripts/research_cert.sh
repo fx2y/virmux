@@ -63,16 +63,13 @@ REPLAY_NONDET_ID=$(cat replay_nondet_output.json | jq -r .run_id)
 go run ./cmd/virmux research timeline --run "$REPLAY_NONDET_ID" | grep "research.replay.nondet_exception" > /dev/null || { echo "FAIL: nondet_exception not found"; exit 1; }
 
 echo "8. Running SQL certification..."
-bash scripts/research_sql_cert.sh --label-glob "$LABEL" --cert-ts "$CERT_TS"
-printf '{"cert_id":"%s","cert_ts":"%s"}\n' "$CERT_ID" "$CERT_TS" > tmp/research-sql-cert.ok
+bash scripts/research_sql_cert.sh --label-glob "$LABEL" --cert-ts "$CERT_TS" --cert-id "$CERT_ID"
 
 echo "9. Running docs drift check..."
-bash scripts/research_docs_drift.sh
-printf '{"cert_id":"%s","cert_ts":"%s"}\n' "$CERT_ID" "$CERT_TS" > tmp/research-docs-drift.ok
+bash scripts/research_docs_drift.sh --cert-ts "$CERT_TS" --cert-id "$CERT_ID"
 
 echo "10. Running portability test..."
-bash scripts/research_portability.sh
-printf '{"cert_id":"%s","cert_ts":"%s"}\n' "$CERT_ID" "$CERT_TS" > tmp/research-portability.ok
+bash scripts/research_portability.sh --cert-ts "$CERT_TS" --cert-id "$CERT_ID"
 
 echo "11. Running parallel scheduler guards..."
 go test ./internal/skill/research -run 'TestSchedulerTopo|TestSchedulerFailure|TestSchedulerReturnsWorkerInfraError|TestSchedulerOnlyMissingDependencyDoesNotDeadlock' > /dev/null

@@ -76,7 +76,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: virmux <vm-run|vm-smoke|vm-zygote|vm-resume|skill|export|import|slack-server>")
+		return errors.New("usage: virmux <vm-run|vm-smoke|vm-zygote|vm-resume|skill|research|export|import|slack-server>")
 	}
 	switch args[0] {
 	case "vm-run":

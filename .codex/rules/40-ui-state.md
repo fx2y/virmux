@@ -8,11 +8,12 @@ paths:
   - "**/*.css"
 ---
 # UI + State Rules
-- UI is ops console: terse copy, explicit status, no decorative ambiguity.
-- Backend contracts are SoT (`runs`,`events`,`tool_calls`,`artifacts`,`scores`,`judge_runs`,`eval_runs`,`experiments`,`comparisons`,`promotions`,`canary_runs`,`refine_runs`,`suggest_runs`,`trace`).
-- State split hard: server snapshots keyed by ID; UI state only for controls; derived state via pure selectors.
-- Render canon: UTC timestamps + raw IDs/enums; no lossy prettification of contract fields.
-- Keep failure keys first-class: `error_code`,`error_retryable`,`resume_mode`,`resume_source`,`resume_error`,`judge_invalid_count`.
-- Evidence drilldown must expose hash+ref+path in one click path.
-- Error panels must show violated invariant + exact repair command (`doctor`,`trace:validate`,`db:check`,`vm:cleanup:audit`,`ship:core`,`ship:skills`).
-- New UI behavior requires deterministic fixtures + at least one headless assertion bound to contract rows/events.
+- UI = ops surface, not marketing. Terse copy, explicit status, no decorative ambiguity.
+- Backend rows/events/artifacts are SoT; UI never invents derived truth not reproducible from contract data.
+- State split hard: server snapshot keyed by IDs; UI state only controls/view prefs; derived state via pure selectors.
+- Render canon: UTC timestamps + raw IDs/enums/codes; no lossy prettification of contract fields.
+- Failure keys are first-class (`error_code`,`error_retryable`,`resume_*`,`lost_*`,`judge_invalid_count`, lane-specific typed failures).
+- Evidence drilldown must expose hash + ref + path in one interaction.
+- Error panels must show violated invariant + exact repair command (`doctor`,`trace:validate`,`db:check`,`vm:cleanup:audit`,`ship:*`).
+- Research UI rule: visually distinguish wrapper run vs target run everywhere replay/map/reduce/timeline are shown.
+- New UI behavior ships deterministic fixtures + at least one headless assertion bound to contract rows/events.

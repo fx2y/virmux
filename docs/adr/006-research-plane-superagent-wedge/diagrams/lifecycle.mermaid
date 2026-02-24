@@ -1,0 +1,20 @@
+sequenceDiagram
+    participant Op as Operator
+    participant CLI as virmux research
+    participant Srv as internal/skill/research
+    participant FS as runs/<id>/
+    participant DB as SQLite (runs/virmux.sqlite)
+
+    Op->>CLI: research run --query "..."
+    CLI->>Srv: Planner.Compile(query)
+    Srv->>FS: persist plan.yaml
+    CLI->>DB: research.plan.created
+    CLI->>Srv: Scheduler.Run(plan)
+    par Tracks
+        Srv->>Srv: Mapper.Exec(track)
+        Srv->>FS: map/<id>.jsonl
+        Srv->>DB: evidence rows
+    end
+    CLI->>Srv: Reducer.Synthesize(maps)
+    Srv->>FS: reduce/report.md
+    CLI->>Op: JSON Summary

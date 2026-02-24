@@ -3,15 +3,15 @@ paths:
   - "**/*"
 ---
 # Core Rules
-- Ship facts, not narratives: if not queryable from sqlite/trace/artifacts, it did not happen.
-- Contract-complete edits only; deferred invariant fixes are regressions.
-- Fail closed + legible: error must name invariant + direct operator action.
-- Determinism is mandatory: no hidden env deps, no unstable schema behavior, no host-path-salted hashes.
-- Keep I/O at boundaries; keep core logic pure/injectable/testable.
-- Inject unstable deps only (`clock,id,runner,process,sleep,timeout,probe`); globals/singletons banned.
-- Retries/timeouts must be explicit, bounded, typed, and guard-covered.
-- Canonical serialization/hash only: sorted inputs, normalized rel paths, fixed metadata.
-- Validators must never mutate evidence/schema (`db:check` is read-only).
-- Schema evolution is additive-only; never silently remove/repurpose contract fields.
-- Harness-critical diffs are surgical; no opportunistic refactor.
-- New recurring failure class must ship same-diff with 1 executable guard + 1 learning capture.
+- `AGENTS.md` is constitution; this file is the short universal overlay.
+- Evidence-only truth: no sqlite/trace/artifact proof => no claim.
+- Contract-complete diffs only; "fix later" on invariants = regression debt.
+- Fail closed; errors name invariant + operator action.
+- Strict parser default; unknown keys/types hard-fail unless explicitly forward-allowed.
+- Determinism first: no hidden env deps, no host-path-salted hashes, no unstable serialization.
+- I/O at boundaries; core pure/injectable/testable; unstable deps DI-only.
+- Retries/timeouts explicit+bounded+typed+guarded.
+- Validators/certs are read-only; never mutate schema/evidence.
+- Schema/API/codes evolve add-only.
+- Harness-critical changes are surgical.
+- New recurring failure class => same diff ships guard + learning capture.
