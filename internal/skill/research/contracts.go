@@ -77,6 +77,7 @@ type PlanInput struct {
 
 type PlanOutput struct {
 	PlanID string
+	Plan   *Plan
 }
 
 type ScheduleInput struct {
@@ -93,8 +94,10 @@ type MapInput struct {
 }
 
 type MapOutput struct {
-	RunID   string
-	TrackID string
+	RunID         string
+	TrackID       string
+	Retryable     bool
+	FailureReason string
 }
 
 type ReduceInput struct {

@@ -102,13 +102,28 @@ func (p *DefaultPlanner) Compile(ctx context.Context, input PlanInput) (PlanOutp
 		Tracks: []Track{
 			{
 				ID:   "track-1",
-				Q:    fmt.Sprintf("Research %s", input.Query),
+				Q:    fmt.Sprintf("Research history of %s", input.Query),
 				Kind: "deep",
 				Budget: PlanBudget{USD: 1.0, Mins: 5},
 				StopRule: "found 1 source",
 			},
+			{
+				ID:   "track-2",
+				Q:    fmt.Sprintf("Research current state of %s", input.Query),
+				Kind: "deep",
+				Budget: PlanBudget{USD: 1.0, Mins: 5},
+				StopRule: "found 1 source",
+			},
+			{
+				ID:   "track-3",
+				Q:    "Synthesize findings",
+				Kind: "deep",
+				Budget: PlanBudget{USD: 1.0, Mins: 5},
+				StopRule: "done",
+				Deps: []string{"track-1", "track-2"},
+			},
 		},
 	}
 	plan.PlanID = plan.Hash()
-	return PlanOutput{PlanID: plan.PlanID}, nil
+	return PlanOutput{PlanID: plan.PlanID, Plan: &plan}, nil
 }
