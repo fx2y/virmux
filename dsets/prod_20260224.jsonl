@@ -1,0 +1,1 @@
+{"id":"prod-20260224-01","input":{"q":"status"},"context_refs":[],"expected_properties":{"must":["status"]},"tags":["core","toolheavy"]}

@@ -84,7 +84,7 @@ go run ./cmd/virmux skill ab \
 ab_rc=$?
 set -e
 
-ab_json="$(tail -n1 "$ab_out_file")"
+ab_json="$(grep -E '^\{.*\}$' "$ab_out_file" | tail -n1 || true)"
 eval_id="$(jq -r '.id // empty' <<<"$ab_json" 2>/dev/null || true)"
 if [[ -z "$eval_id" ]]; then
   echo "canary:run: failed to parse eval id from skill ab output" >&2

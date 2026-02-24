@@ -307,11 +307,17 @@ run = "./scripts/skill_test_c6.sh"
 sources = ["scripts/skill_test_c6.sh", "scripts/skill_docs_drift.sh", "scripts/db_check.sh", "cmd/virmux/cwd_parallel_guard_test.go", "cmd/virmux/db_check_script_test.go", "cmd/virmux/export_import.go", "cmd/virmux/export_import_test.go", "internal/skill/run/core_test.go", "mise.toml", "docs/**/*.md", "AGENTS.md", "spec-0/04-htn.jsonl", "spec-0/05/cli-map.jsonl", "spec-0/05/56-c6-portability-hardening.jsonl", "spec-0/05/c0-data-map.jsonl"]
 outputs = ["tmp/skill-test-c6.ok", "tmp/skill-docs-drift.ok"]
 
+[tasks."skill:test:c7"]
+description = "Focused C7 cert+cutover guards"
+run = "./scripts/skill_test_c7.sh"
+sources = ["scripts/skill_test_c7.sh", "scripts/skill_canary_cert.sh", "scripts/skill_sql_cert.sh", "scripts/spec05_dod_matrix.sh", "scripts/rollback_playbook_smoke.sh", "scripts/canary_run.sh", "scripts/cleanup_audit.sh", "cmd/virmux/skill_test.go", "internal/skill/promosvc/service_test.go", "docs/ops/spec05-card.md", "docs/ops/spec05-rollback-playbook.md", "spec-0/05/57-c7-cert-cutover.jsonl", "mise.toml"]
+outputs = ["tmp/skill-test-c7.ok", "tmp/skill-canary-cert.ok", "tmp/spec05-dod-matrix.json", "tmp/spec05-residual-risk.md", "tmp/rollback-playbook-smoke.ok"]
+
 [tasks."skill:test"]
-description = "Combined C1..C6 skill guard lane"
-depends = ["skill:test:core", "skill:test:c2", "skill:test:c3", "skill:test:c4", "skill:test:c5", "skill:test:c6"]
+description = "Combined C1..C7 skill guard lane"
+depends = ["skill:test:core", "skill:test:c2", "skill:test:c3", "skill:test:c4", "skill:test:c5", "skill:test:c6", "skill:test:c7"]
 run = "mkdir -p tmp && date -u +%FT%TZ > tmp/skill-test.ok"
-sources = ["scripts/skill_test_core.sh", "scripts/skill_test_c2.sh", "scripts/skill_test_c3.sh", "scripts/skill_test_c4.sh", "scripts/skill_test_c5.sh", "scripts/skill_test_c6.sh", "scripts/skill_docs_drift.sh", "cmd/**/*.go", "internal/**/*.go", "skills/**/*.md", "skills/**/*.yaml", "skills/**/*.json", "docs/**/*.md", "AGENTS.md", "spec-0/04-htn.jsonl", "mise.toml"]
+sources = ["scripts/skill_test_core.sh", "scripts/skill_test_c2.sh", "scripts/skill_test_c3.sh", "scripts/skill_test_c4.sh", "scripts/skill_test_c5.sh", "scripts/skill_test_c6.sh", "scripts/skill_test_c7.sh", "scripts/skill_docs_drift.sh", "cmd/**/*.go", "internal/**/*.go", "skills/**/*.md", "skills/**/*.yaml", "skills/**/*.json", "docs/**/*.md", "AGENTS.md", "spec-0/04-htn.jsonl", "spec-0/05/57-c7-cert-cutover.jsonl", "mise.toml"]
 outputs = ["tmp/skill-test.ok"]
 
 [tasks."skill:eval"]
@@ -336,8 +342,8 @@ outputs = ["tmp/skill-sql-cert.ok", "tmp/skill-sql-cert-summary.json"]
 [tasks."ship:skills"]
 description = "Uncached skill lane certification (isolated from ship:core)"
 run = "./scripts/ship_skills.sh"
-sources = ["scripts/ship_skills.sh", "scripts/cleanup_audit.sh", "scripts/skill_docs_drift.sh", "scripts/skill_eval.sh", "scripts/skill_ab.sh", "scripts/skill_sql_cert.sh", "scripts/skill_test_core.sh", "scripts/skill_test_c2.sh", "scripts/skill_test_c3.sh", "scripts/skill_test_c4.sh", "scripts/skill_test_c5.sh", "scripts/skill_test_c6.sh", "scripts/dset_lint.sh", "scripts/canary_snapshot.sh", "scripts/canary_run.sh", "scripts/canary_report.sh", "cmd/**/*.go", "internal/**/*.go", "dsets/**/*.jsonl", "skills/**/*.md", "skills/**/*.yaml", "skills/**/*.json", "docs/**/*.md", "AGENTS.md", "spec-0/04-htn.jsonl", "spec-0/05-htn.jsonl", "package.json", "package-lock.json", "mise.toml"]
-outputs = ["tmp/ship-skills-summary.json", "tmp/skill-sql-cert.ok", "tmp/cleanup-audit.ok", "tmp/skill-test-c6.ok", "tmp/skill-docs-drift.ok"]
+sources = ["scripts/ship_skills.sh", "scripts/cleanup_audit.sh", "scripts/skill_docs_drift.sh", "scripts/skill_eval.sh", "scripts/skill_ab.sh", "scripts/skill_sql_cert.sh", "scripts/skill_canary_cert.sh", "scripts/spec05_dod_matrix.sh", "scripts/rollback_playbook_smoke.sh", "scripts/skill_test_core.sh", "scripts/skill_test_c2.sh", "scripts/skill_test_c3.sh", "scripts/skill_test_c4.sh", "scripts/skill_test_c5.sh", "scripts/skill_test_c6.sh", "scripts/skill_test_c7.sh", "scripts/dset_lint.sh", "scripts/canary_snapshot.sh", "scripts/canary_run.sh", "scripts/canary_report.sh", "cmd/**/*.go", "internal/**/*.go", "dsets/**/*.jsonl", "skills/**/*.md", "skills/**/*.yaml", "skills/**/*.json", "docs/**/*.md", "AGENTS.md", "spec-0/04-htn.jsonl", "spec-0/05-htn.jsonl", "spec-0/05/57-c7-cert-cutover.jsonl", "package.json", "package-lock.json", "mise.toml"]
+outputs = ["tmp/ship-skills-summary.json", "tmp/skill-sql-cert.ok", "tmp/skill-canary-cert.ok", "tmp/spec05-dod-matrix.json", "tmp/spec05-residual-risk.md", "tmp/rollback-playbook-smoke.ok", "tmp/cleanup-audit.ok", "tmp/skill-test-c7.ok", "tmp/skill-docs-drift.ok"]
 
 [tasks.fmt]
 description = "Format Go and JS"

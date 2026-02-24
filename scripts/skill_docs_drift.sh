@@ -8,6 +8,8 @@ docs=(
   "docs/rfcs/000-ghostfleet-compounding-os.md"
   "docs/rfcs/000-ghostfleet-compounding-os/01-walkthroughs.md"
   "docs/rfcs/000-ghostfleet-compounding-os/02-snippets.md"
+  "docs/ops/spec05-card.md"
+  "docs/ops/spec05-rollback-playbook.md"
 )
 
 # Fail on stale claims that conflict with spec-04 canon.
@@ -51,6 +53,22 @@ rg -n "trace\\.ndjson" AGENTS.md >/dev/null || {
 }
 rg -n "SKILL\\.md.*SoT" AGENTS.md >/dev/null || {
   echo "skill:docs-drift: missing SKILL.md canon in AGENTS.md" >&2
+  exit 1
+}
+rg -n -F "virmux skill <lint|run|judge|ab|refine|suggest|promote|replay>" docs/ops/spec05-card.md >/dev/null || {
+  echo "skill:docs-drift: missing canon command block in spec05 card" >&2
+  exit 1
+}
+rg -n -F "map.cli.ghostfleet->virmux" docs/ops/spec05-card.md >/dev/null || {
+  echo "skill:docs-drift: missing translation map anchor in spec05 card" >&2
+  exit 1
+}
+rg -n -F "virmux skill promote --rollback --to-ref" docs/ops/spec05-rollback-playbook.md >/dev/null || {
+  echo "skill:docs-drift: missing rollback command in rollback playbook" >&2
+  exit 1
+}
+rg -n -F "./scripts/cleanup_audit.sh" docs/ops/spec05-rollback-playbook.md >/dev/null || {
+  echo "skill:docs-drift: missing cleanup audit step in rollback playbook" >&2
   exit 1
 }
 

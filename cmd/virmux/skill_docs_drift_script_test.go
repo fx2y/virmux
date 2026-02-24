@@ -39,6 +39,7 @@ func setupDocsDriftRepoFixture(t *testing.T, includeStale bool) string {
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	mustMkdirAll(t, filepath.Join(repo, "docs", "rfcs", "000-ghostfleet-compounding-os"))
+	mustMkdirAll(t, filepath.Join(repo, "docs", "ops"))
 	mustMkdirAll(t, filepath.Join(repo, "spec-0", "05"))
 
 	runGit := func(args ...string) {
@@ -60,6 +61,8 @@ func setupDocsDriftRepoFixture(t *testing.T, includeStale bool) string {
 	mustWriteFile(t, filepath.Join(repo, "docs", "rfcs", "000-ghostfleet-compounding-os.md"), baseDoc)
 	mustWriteFile(t, filepath.Join(repo, "docs", "rfcs", "000-ghostfleet-compounding-os", "01-walkthroughs.md"), "walkthrough\n")
 	mustWriteFile(t, filepath.Join(repo, "docs", "rfcs", "000-ghostfleet-compounding-os", "02-snippets.md"), "snips\n")
+	mustWriteFile(t, filepath.Join(repo, "docs", "ops", "spec05-card.md"), "map.cli.ghostfleet->virmux\nvirmux skill <lint|run|judge|ab|refine|suggest|promote|replay>\n")
+	mustWriteFile(t, filepath.Join(repo, "docs", "ops", "spec05-rollback-playbook.md"), "virmux skill promote --rollback --to-ref\n./scripts/cleanup_audit.sh\n")
 	mustWriteFile(t, filepath.Join(repo, "AGENTS.md"), "trace.ndjson\nSKILL.md is SoT\n")
 	mustWriteFile(t, filepath.Join(repo, "spec-0", "04-htn.jsonl"), `{"id":"canon","cmd":"virmux skill <lint|run|judge|ab|refine|suggest|promote|replay>"}`+"\n")
 	mustWriteFile(t, filepath.Join(repo, "spec-0", "05", "cli-map.jsonl"), `{"id":"map.cli.ghostfleet->virmux","cmd_canon":"virmux skill <lint|run|judge|ab|refine|suggest|promote|replay>"}`+"\n")

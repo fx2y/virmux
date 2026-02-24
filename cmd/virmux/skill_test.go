@@ -225,6 +225,72 @@ func TestCmdSkillPromoteWritesTagAndPromotionRow(t *testing.T) {
 	}
 }
 
+func TestCmdSkillPromoteRollbackWritesAuditRow(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	repo := filepath.Join(tmp, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, string(out))
+		}
+	}
+	run("init")
+	run("config", "user.email", "test@example.com")
+	run("config", "user.name", "tester")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "README.md")
+	run("commit", "-m", "init")
+	out, err := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	headRef := strings.TrimSpace(string(out))
+
+	dbPath := filepath.Join(tmp, "runs", "virmux.sqlite")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+	if err := cmdSkillPromote([]string{
+		"--db", dbPath,
+		"--repo-dir", repo,
+		"--rollback",
+		"--to-ref", headRef,
+		"--reason", "c7 smoke rollback",
+		"dd",
+	}); err != nil {
+		t.Fatalf("cmdSkillPromote rollback: %v", err)
+	}
+
+	ist, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ist.Close()
+	var op, toRef, reason string
+	if err := ist.DB().QueryRow(`SELECT op,to_ref,reason FROM promotions WHERE skill='dd' ORDER BY created_at DESC,id DESC LIMIT 1`).Scan(&op, &toRef, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if op != "rollback" {
+		t.Fatalf("expected op=rollback, got %s", op)
+	}
+	if toRef != headRef {
+		t.Fatalf("expected to_ref=%s, got %s", headRef, toRef)
+	}
+	if reason != "c7 smoke rollback" {
+		t.Fatalf("expected reason persisted, got %s", reason)
+	}
+}
+
 func TestCmdSkillRefineCreatesBranchCommitArtifactsAndAuditRow(t *testing.T) {
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
