@@ -26,9 +26,32 @@ done
 
 [[ -f "$db" ]] || { echo "spec06:dod: missing db $db" >&2; exit 1; }
 [[ -f "$root/tmp/research-sql-cert-summary.json" ]] || { echo "spec06:dod: missing tmp/research-sql-cert-summary.json" >&2; exit 1; }
+[[ -n "$cert_ts" ]] || { echo "spec06:dod: --cert-ts required for freshness-scoped proofs" >&2; exit 1; }
+
+is_fresh_file() {
+  local path="$1"
+  [[ -f "$path" ]] || return 1
+  python3 - "$path" "$cert_ts" <<'PY'
+import datetime, os, sys
+path, cert_ts = sys.argv[1], sys.argv[2]
+cert = datetime.datetime.strptime(cert_ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+mtime = datetime.datetime.fromtimestamp(os.path.getmtime(path), tz=datetime.timezone.utc)
+raise SystemExit(0 if mtime >= cert else 1)
+PY
+}
+
+marker_matches_cert() {
+  local path="$1"
+  is_fresh_file "$path" || return 1
+  jq -e --arg cert_ts "$cert_ts" '.cert_ts == $cert_ts' "$path" >/dev/null 2>&1
+}
 
 # Load SQL cert summary for metrics
 sql_cert_json="$(cat "$root/tmp/research-sql-cert-summary.json")"
+jq -e --arg cert_ts "$cert_ts" '.cert_ts == $cert_ts' "$root/tmp/research-sql-cert-summary.json" >/dev/null || {
+  echo "spec06:dod: stale or mismatched research-sql-cert-summary.json for cert-ts=$cert_ts" >&2
+  exit 1
+}
 run_count=$(echo "$sql_cert_json" | jq .research_run_count)
 reduce_count=$(echo "$sql_cert_json" | jq .research_reduce_count)
 replay_count=$(echo "$sql_cert_json" | jq .research_replay_count)
@@ -36,10 +59,10 @@ evidence_count=$(echo "$sql_cert_json" | jq .evidence_count)
 reports_count=$(echo "$sql_cert_json" | jq .reports_count)
 
 plan_ok=0
-[[ -f "$root/tmp/research-cert.ok" ]] && plan_ok=1
+marker_matches_cert "$root/tmp/research-cert.ok" && plan_ok=1
 
 parallel_ok=0
-[[ -f "$root/tmp/research-parallel.ok" ]] && parallel_ok=1
+marker_matches_cert "$root/tmp/research-parallel.ok" && parallel_ok=1
 
 reduce_ok=0
 [[ "$reports_count" -ge 1 ]] && reduce_ok=1
@@ -48,10 +71,10 @@ replay_ok=0
 [[ "$replay_count" -ge 1 ]] && replay_ok=1
 
 portability_ok=0
-[[ -f "$root/tmp/research-portability.ok" ]] && portability_ok=1
+marker_matches_cert "$root/tmp/research-portability.ok" && portability_ok=1
 
 docs_ok=0
-[[ -f "$root/tmp/research-docs-drift.ok" ]] && docs_ok=1
+marker_matches_cert "$root/tmp/research-docs-drift.ok" && docs_ok=1
 
 mkdir -p "$(dirname "$out_json")" "$(dirname "$risk_md")"
 

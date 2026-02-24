@@ -61,6 +61,9 @@ func TestReducerRun(t *testing.T) {
 	if !strings.Contains(string(report), "Found 1 cited claims") {
 		t.Error("report should have 1 cited claim")
 	}
+	if !strings.Contains(string(report), "## Contradictions") {
+		t.Error("report should always include contradictions section")
+	}
 	if !strings.Contains(string(report), "Quality Section (Uncited Data)") {
 		t.Error("report should have quality section for uncited data")
 	}

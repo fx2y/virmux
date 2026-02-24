@@ -9,6 +9,9 @@ echo "--- Research Certification Started ---"
 CERT_ID=$(date +%s)
 LABEL="research-cert-$CERT_ID"
 CERT_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+mkdir -p tmp
+rm -f tmp/research-cert.ok tmp/research-parallel.ok tmp/research-portability.ok tmp/research-docs-drift.ok \
+  tmp/research-sql-cert.ok tmp/research-sql-cert-summary.json tmp/spec06-dod-matrix.json tmp/spec06-residual-risk.md
 
 QUERY="Certification Test $CERT_ID"
 echo "1. Running full research run with label $LABEL..."
@@ -47,32 +50,38 @@ go run ./cmd/virmux research reduce --run "$RUN_ID" --label "$LABEL"
 cat "runs/$RUN_ID/reduce/report.md" | grep "## Contradictions" > /dev/null || { echo "FAIL: report.md missing Contradictions section"; exit 1; }
 
 echo "7. Testing deterministic bypass with label $LABEL..."
-# Mark track-1 as deterministic: false
-# Use a robust way to insert deterministic: false after id: track-1
-sed -i '/id: track-1/a \  deterministic: false' "runs/$RUN_ID/plan.yaml"
+# Preserve original certified run plan; create revision artifacts in a cloned target for nondet demo.
+NONDET_RUN_ID="${RUN_ID}-nondet"
+rm -rf "runs/$NONDET_RUN_ID"
+cp -a "runs/$RUN_ID" "runs/$NONDET_RUN_ID"
+cp "runs/$NONDET_RUN_ID/plan.yaml" "runs/$NONDET_RUN_ID/plan.rev1.yaml"
+sed '/id: track-1/a \  deterministic: false' "runs/$NONDET_RUN_ID/plan.rev1.yaml" > "runs/$NONDET_RUN_ID/plan.rev2.yaml"
+cp "runs/$NONDET_RUN_ID/plan.rev2.yaml" "runs/$NONDET_RUN_ID/plan.yaml"
 
-go run ./cmd/virmux research replay --run "$RUN_ID" --only track-1 --label "$LABEL" > replay_nondet_output.json
+go run ./cmd/virmux research replay --run "$NONDET_RUN_ID" --only track-1 --label "$LABEL" > replay_nondet_output.json
 REPLAY_NONDET_ID=$(cat replay_nondet_output.json | jq -r .run_id)
 go run ./cmd/virmux research timeline --run "$REPLAY_NONDET_ID" | grep "research.replay.nondet_exception" > /dev/null || { echo "FAIL: nondet_exception not found"; exit 1; }
 
 echo "8. Running SQL certification..."
 bash scripts/research_sql_cert.sh --label-glob "$LABEL" --cert-ts "$CERT_TS"
+printf '{"cert_id":"%s","cert_ts":"%s"}\n' "$CERT_ID" "$CERT_TS" > tmp/research-sql-cert.ok
 
 echo "9. Running docs drift check..."
 bash scripts/research_docs_drift.sh
+printf '{"cert_id":"%s","cert_ts":"%s"}\n' "$CERT_ID" "$CERT_TS" > tmp/research-docs-drift.ok
 
 echo "10. Running portability test..."
 bash scripts/research_portability.sh
+printf '{"cert_id":"%s","cert_ts":"%s"}\n' "$CERT_ID" "$CERT_TS" > tmp/research-portability.ok
 
 echo "11. Running parallel scheduler guards..."
 go test ./internal/skill/research -run 'TestSchedulerTopo|TestSchedulerFailure|TestSchedulerReturnsWorkerInfraError|TestSchedulerOnlyMissingDependencyDoesNotDeadlock' > /dev/null
-mkdir -p tmp
-date > tmp/research-parallel.ok
+printf '{"cert_id":"%s","cert_ts":"%s"}\n' "$CERT_ID" "$CERT_TS" > tmp/research-parallel.ok
+printf '{"cert_id":"%s","cert_ts":"%s"}\n' "$CERT_ID" "$CERT_TS" > tmp/research-cert.ok
 
 echo "12. Generating DoD matrix..."
-bash scripts/spec06_dod_matrix.sh
+bash scripts/spec06_dod_matrix.sh --cert-ts "$CERT_TS"
 
 echo "--- Research Certification PASSED ---"
 rm -f run_output.json replay_output.json replay_nondet_output.json
-date > tmp/research-cert.ok
 echo "{\"status\": \"ok\", \"ts\": \"$(date -u +%FT%TZ)\"}" > tmp/ship-research-summary.json

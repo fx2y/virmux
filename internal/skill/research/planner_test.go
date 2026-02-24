@@ -31,7 +31,11 @@ func TestPlanValidate(t *testing.T) {
 	if err := p.Validate(); err == nil {
 		t.Errorf("expected error for missing dims_you_didnt_ask")
 	}
-	p.DimsDidntAsk = []string{"test-dim"}
+	p.DimsDidntAsk = []string{"d1", "d2", "d3", "d4"}
+	if err := p.Validate(); err == nil {
+		t.Errorf("expected error for missing reduce.outputs")
+	}
+	p.Reduce = ReduceConfig{Outputs: []string{"report.md"}}
 	if err := p.Validate(); err != nil {
 		t.Errorf("expected no error for valid plan, got %v", err)
 	}
@@ -40,7 +44,8 @@ func TestPlanValidate(t *testing.T) {
 func TestPlanValidateWide(t *testing.T) {
 	p := &Plan{
 		Goal:         "test",
-		DimsDidntAsk: []string{"test-dim"},
+		DimsDidntAsk: []string{"d1", "d2", "d3", "d4"},
+		Reduce:       ReduceConfig{Outputs: []string{"report.md"}},
 	}
 	p.Tracks = []Track{{ID: "1", Q: "q", Kind: "wide"}}
 	if err := p.Validate(); err == nil {
@@ -54,6 +59,18 @@ func TestPlanValidateWide(t *testing.T) {
 	p.Tracks[0].StopRule = "coverage>=0.5"
 	if err := p.Validate(); err != nil {
 		t.Errorf("expected no error for valid wide plan, got %v", err)
+	}
+}
+
+func TestPlanValidateDimsFloor(t *testing.T) {
+	p := &Plan{
+		Goal:         "test",
+		DimsDidntAsk: []string{"d1", "d2", "d3"},
+		Reduce:       ReduceConfig{Outputs: []string{"report.md"}},
+		Tracks:       []Track{{ID: "1", Q: "q", Kind: "deep"}},
+	}
+	if err := p.Validate(); err == nil {
+		t.Fatalf("expected dims floor validation error")
 	}
 }
 

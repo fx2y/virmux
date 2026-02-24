@@ -31,7 +31,7 @@ func TestReplayRejectsUnknownOnlyTrack(t *testing.T) {
 	planYAML := []byte(`
 plan_id: p1
 goal: q
-dims_you_didnt_ask: [a]
+dims_you_didnt_ask: [a,b,c,d]
 tracks:
   - id: track-1
     q: foo

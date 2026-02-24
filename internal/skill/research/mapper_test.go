@@ -38,7 +38,8 @@ func TestMapperRun(t *testing.T) {
 	plan := &Plan{
 		PlanID:       "test-plan",
 		Goal:         "test goal",
-		DimsDidntAsk: []string{"none"},
+		DimsDidntAsk: []string{"d1", "d2", "d3", "d4"},
+		Reduce:       ReduceConfig{Outputs: []string{"report.md"}},
 		Tracks: []Track{
 			{ID: "T1", Q: "Query 1", Kind: "deep"},
 		},
@@ -90,7 +91,8 @@ func TestMapperWide(t *testing.T) {
 	plan := &Plan{
 		PlanID:       "wide-plan",
 		Goal:         "wide goal",
-		DimsDidntAsk: []string{"none"},
+		DimsDidntAsk: []string{"d1", "d2", "d3", "d4"},
+		Reduce:       ReduceConfig{Outputs: []string{"report.md"}},
 		Tracks: []Track{
 			{
 				ID: "W1", Q: "Wide Query", Kind: "wide",

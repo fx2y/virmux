@@ -140,14 +140,16 @@ func (r *DefaultReducer) writeReport(dir string, cited, uncited []MapResultRow, 
 		fmt.Fprintf(f, "No cited claims found.\n\n")
 	}
 
+	fmt.Fprintf(f, "## Contradictions\n\n")
 	if len(mismatches) > 0 {
-		fmt.Fprintf(f, "## Contradictions\n\n")
 		fmt.Fprintf(f, "The following tracks showed mismatches during replay:\n\n")
 		for trackID, ms := range mismatches {
 			fmt.Fprintf(f, "- **%s**: %s\n", trackID, strings.Join(ms, "; "))
 		}
-		fmt.Fprintf(f, "\n")
+	} else {
+		fmt.Fprintf(f, "None.\n")
 	}
+	fmt.Fprintf(f, "\n")
 
 	fmt.Fprintf(f, "## Findings\n\n")
 	for _, row := range cited {

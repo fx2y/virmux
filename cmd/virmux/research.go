@@ -140,6 +140,9 @@ func cmdResearchReplay(args []string) error {
 		if err != nil {
 			return vm.Outcome{}, nil, err
 		}
+		if err := persistResearchTargetArtifacts(ctx, st, cfg.runsDir, *runID); err != nil {
+			return vm.Outcome{}, nil, fmt.Errorf("persist target artifacts: %w", err)
+		}
 
 		return vm.Outcome{}, map[string]any{"run_id": output.RunID}, nil
 	}, defaultRunRuntime)
@@ -173,6 +176,9 @@ func cmdResearchRun(args []string) error {
 			return vm.Outcome{}, nil, err
 		}
 		_ = emitVM("research.plan.created", map[string]any{"plan_id": planOutput.PlanID, "path": "plan.yaml"})
+		if err := persistResearchTargetArtifacts(ctx, st, cfg.runsDir, filepath.Base(runDir)); err != nil {
+			return vm.Outcome{}, nil, fmt.Errorf("persist research artifacts: %w", err)
+		}
 
 		// 2. Map
 		mapper := &research.DefaultMapper{RunsDir: cfg.runsDir, CacheDir: cacheDir, Store: st}
@@ -194,6 +200,9 @@ func cmdResearchRun(args []string) error {
 		_, err = reducer.Run(ctx, research.ReduceInput{RunID: runID})
 		if err != nil {
 			return vm.Outcome{}, nil, fmt.Errorf("reducer: %w", err)
+		}
+		if err := persistResearchTargetArtifacts(ctx, st, cfg.runsDir, runID); err != nil {
+			return vm.Outcome{}, nil, fmt.Errorf("persist research artifacts: %w", err)
 		}
 
 		return vm.Outcome{}, map[string]any{
@@ -226,6 +235,9 @@ func cmdResearchReduce(args []string) error {
 		output, err := reducer.Run(ctx, research.ReduceInput{RunID: *runID})
 		if err != nil {
 			return vm.Outcome{}, nil, fmt.Errorf("reducer run: %w", err)
+		}
+		if err := persistResearchTargetArtifacts(ctx, st, cfg.runsDir, *runID); err != nil {
+			return vm.Outcome{}, nil, fmt.Errorf("persist target artifacts: %w", err)
 		}
 
 		// Prepare summary details
@@ -290,6 +302,9 @@ func cmdResearchMap(args []string) error {
 		states, err := scheduler.Run(ctx, plan, *runID, onlyList)
 		if err != nil {
 			return vm.Outcome{}, nil, fmt.Errorf("scheduler run: %w", err)
+		}
+		if err := persistResearchTargetArtifacts(ctx, st, cfg.runsDir, *runID); err != nil {
+			return vm.Outcome{}, nil, fmt.Errorf("persist target artifacts: %w", err)
 		}
 
 		// 4. Report status
@@ -385,6 +400,9 @@ func cmdResearchPlan(args []string) error {
 		if err := os.WriteFile(planPath, data, 0644); err != nil {
 			return vm.Outcome{}, nil, err
 		}
+		if err := persistResearchTargetArtifacts(ctx, st, cfg.runsDir, filepath.Base(runDir)); err != nil {
+			return vm.Outcome{}, nil, fmt.Errorf("persist research artifacts: %w", err)
+		}
 
 		if err := emitVM("research.plan.created", map[string]any{"plan_id": output.PlanID, "path": planPath}); err != nil {
 			return vm.Outcome{}, nil, err
@@ -402,4 +420,22 @@ func cmdResearchPlan(args []string) error {
 
 func timeDuration(seconds int) time.Duration {
 	return time.Duration(seconds) * time.Second
+}
+
+func persistResearchTargetArtifacts(ctx context.Context, st *store.Store, runsDir, runID string) error {
+	if st == nil {
+		return nil
+	}
+	var exists int
+	if err := st.DB().QueryRowContext(ctx, `SELECT 1 FROM runs WHERE id=? LIMIT 1`, runID).Scan(&exists); err != nil {
+		// Allow filesystem-only target operations (e.g. cloned throwaway replay targets) without DB rows.
+		return nil
+	}
+	runDir := filepath.Join(runsDir, runID)
+	return persistRunArtifacts(ctx, st, runID, []string{
+		filepath.Join(runDir, "plan.yaml"),
+		filepath.Join(runDir, "map"),
+		filepath.Join(runDir, "reduce"),
+		filepath.Join(runDir, "mismatch.json"),
+	})
 }

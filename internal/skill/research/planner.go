@@ -20,13 +20,13 @@ type TrackSchema struct {
 }
 
 type Track struct {
-	ID       string      `yaml:"id"`
-	Q        string      `yaml:"q"`
-	Kind     string      `yaml:"kind"` // "deep" or "wide"
-	Targets  []string    `yaml:"targets,omitempty"`
-	Attrs    []string    `yaml:"attrs,omitempty"`
-	Schema   TrackSchema `yaml:"schema"`
-	Budget   PlanBudget  `yaml:"budget"`
+	ID            string      `yaml:"id"`
+	Q             string      `yaml:"q"`
+	Kind          string      `yaml:"kind"` // "deep" or "wide"
+	Targets       []string    `yaml:"targets,omitempty"`
+	Attrs         []string    `yaml:"attrs,omitempty"`
+	Schema        TrackSchema `yaml:"schema"`
+	Budget        PlanBudget  `yaml:"budget"`
 	StopRule      string      `yaml:"stop_rule"`
 	Deps          []string    `yaml:"deps"`
 	Deterministic *bool       `yaml:"deterministic,omitempty"`
@@ -67,6 +67,12 @@ func (p *Plan) Validate() error {
 	}
 	if len(p.DimsDidntAsk) == 0 {
 		return fmt.Errorf("%s: dims_you_didnt_ask is mandatory", FailurePlanSchema)
+	}
+	if len(p.DimsDidntAsk) < 4 {
+		return fmt.Errorf("%s: dims_you_didnt_ask must contain >=4 items", FailurePlanSchema)
+	}
+	if len(p.Reduce.Outputs) == 0 {
+		return fmt.Errorf("%s: reduce.outputs is required", FailurePlanSchema)
 	}
 	for _, t := range p.Tracks {
 		if t.ID == "" {
@@ -117,17 +123,17 @@ func (p *DefaultPlanner) Compile(ctx context.Context, input PlanInput) (PlanOutp
 	// Stubbed implementation with wide/deep classification logic
 	tracks := []Track{
 		{
-			ID:   "track-1",
-			Q:    fmt.Sprintf("Research history of %s", input.Query),
-			Kind: "deep",
-			Budget: PlanBudget{USD: 1.0, Mins: 5},
+			ID:       "track-1",
+			Q:        fmt.Sprintf("Research history of %s", input.Query),
+			Kind:     "deep",
+			Budget:   PlanBudget{USD: 1.0, Mins: 5},
 			StopRule: "found 1 source",
 		},
 		{
-			ID:   "track-2",
-			Q:    fmt.Sprintf("Research current state of %s", input.Query),
-			Kind: "deep",
-			Budget: PlanBudget{USD: 1.0, Mins: 5},
+			ID:       "track-2",
+			Q:        fmt.Sprintf("Research current state of %s", input.Query),
+			Kind:     "deep",
+			Budget:   PlanBudget{USD: 1.0, Mins: 5},
 			StopRule: "found 1 source",
 		},
 	}
@@ -154,19 +160,23 @@ func (p *DefaultPlanner) Compile(ctx context.Context, input PlanInput) (PlanOutp
 	}
 
 	tracks = append(tracks, Track{
-		ID:   "track-synth",
-		Q:    "Synthesize findings",
-		Kind: "deep",
-		Budget: PlanBudget{USD: 1.0, Mins: 5},
+		ID:       "track-synth",
+		Q:        "Synthesize findings",
+		Kind:     "deep",
+		Budget:   PlanBudget{USD: 1.0, Mins: 5},
 		StopRule: "done",
-		Deps: []string{"track-1", "track-2"},
+		Deps:     []string{"track-1", "track-2"},
 	})
 
 	plan := Plan{
 		Goal:         input.Query,
-		DimsDidntAsk: []string{"dims you didn't ask"},
+		DimsDidntAsk: []string{"timeline", "counterevidence", "operator-cost", "failure-modes"},
 		Tracks:       tracks,
 		Unknowns:     unknowns,
+		Reduce: ReduceConfig{
+			Outputs: []string{"table.csv", "report.md", "slides.md"},
+			Rubric:  []string{"citation coverage", "contradictions explicit", "deterministic formatting"},
+		},
 	}
 	plan.PlanID = plan.Hash()
 	return PlanOutput{PlanID: plan.PlanID, Plan: &plan}, nil
