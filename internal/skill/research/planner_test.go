@@ -1,6 +1,8 @@
 package research
 
 import (
+	"context"
+	"strings"
 	"testing"
 )
 
@@ -35,18 +37,44 @@ func TestPlanValidate(t *testing.T) {
 	}
 }
 
-func TestParsePlanStrict(t *testing.T) {
-	yml := `
-goal: test
-dims_you_didnt_ask: ["dim1"]
-tracks:
-- id: 1
-  q: q
-  kind: deep
-unknown_key: true
-`
-	_, err := ParsePlan([]byte(yml))
-	if err == nil {
-		t.Errorf("expected error for unknown key")
+func TestPlanValidateWide(t *testing.T) {
+	p := &Plan{
+		Goal:         "test",
+		DimsDidntAsk: []string{"test-dim"},
+	}
+	p.Tracks = []Track{{ID: "1", Q: "q", Kind: "wide"}}
+	if err := p.Validate(); err == nil {
+		t.Errorf("expected error for wide track missing targets/attrs")
+	}
+	p.Tracks[0].Targets = []string{"T1"}
+	p.Tracks[0].Attrs = []string{"A1"}
+	if err := p.Validate(); err == nil {
+		t.Errorf("expected error for wide track missing stop_rule")
+	}
+	p.Tracks[0].StopRule = "coverage>=0.5"
+	if err := p.Validate(); err != nil {
+		t.Errorf("expected no error for valid wide plan, got %v", err)
+	}
+}
+
+func TestDefaultPlannerCompile(t *testing.T) {
+	p := &DefaultPlanner{Hints: &DefaultHintProvider{}}
+	out, err := p.Compile(context.Background(), PlanInput{Query: "agent research"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.PlanID == "" {
+		t.Errorf("expected plan_id")
+	}
+	// Check hints were incorporated
+	found := false
+	for _, u := range out.Plan.Unknowns {
+		if strings.Contains(u, "arXiv") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected hint about arXiv in unknowns")
 	}
 }

@@ -62,13 +62,19 @@ type Replay interface {
 	Run(context.Context, ReplayInput) (ReplayOutput, error)
 }
 
+// HintProvider provides advisory decomposition/retrieval hints based on motifs.
+type HintProvider interface {
+	GetHints(ctx context.Context, query string) ([]string, error)
+}
+
 // Services groups research seams for thin cmd handlers.
 type Services struct {
-	Planner   Planner
-	Scheduler Scheduler
-	Mapper    Mapper
-	Reducer   Reducer
-	Replay    Replay
+	Planner      Planner
+	Scheduler    Scheduler
+	Mapper       Mapper
+	Reducer      Reducer
+	Replay       Replay
+	HintProvider HintProvider
 }
 
 type PlanInput struct {
