@@ -60,9 +60,11 @@ func setupDocsDriftRepoFixture(t *testing.T, includeStale bool) string {
 	mustWriteFile(t, filepath.Join(repo, "docs", "rfcs", "000-ghostfleet-compounding-os.md"), baseDoc)
 	mustWriteFile(t, filepath.Join(repo, "docs", "rfcs", "000-ghostfleet-compounding-os", "01-walkthroughs.md"), "walkthrough\n")
 	mustWriteFile(t, filepath.Join(repo, "docs", "rfcs", "000-ghostfleet-compounding-os", "02-snippets.md"), "snips\n")
-	mustWriteFile(t, filepath.Join(repo, "AGENTS.md"), "trace.ndjson\n")
+	mustWriteFile(t, filepath.Join(repo, "AGENTS.md"), "trace.ndjson\nSKILL.md is SoT\n")
 	mustWriteFile(t, filepath.Join(repo, "spec-0", "04-htn.jsonl"), `{"id":"canon","cmd":"virmux skill <lint|run|judge|ab|refine|suggest|promote|replay>"}`+"\n")
 	mustWriteFile(t, filepath.Join(repo, "spec-0", "05", "cli-map.jsonl"), `{"id":"map.cli.ghostfleet->virmux","cmd_canon":"virmux skill <lint|run|judge|ab|refine|suggest|promote|replay>"}`+"\n")
+	mustWriteFile(t, filepath.Join(repo, "spec-0", "05", "56-c6-portability-hardening.jsonl"), `{"id":"s05.c6.wp.dbcheck","t":"db:check validator-only"}`+"\n")
+	mustWriteFile(t, filepath.Join(repo, "spec-0", "05", "c0-data-map.jsonl"), `{"id":"map.data.bundle.scope","d":"eval_runs,eval_cases,promotions,experiments,comparisons,suggest_runs"}`+"\n")
 	mustWriteFile(t, filepath.Join(repo, "README.md"), "x\n")
 
 	runGit("add", ".")

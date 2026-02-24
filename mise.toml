@@ -304,7 +304,7 @@ outputs = ["tmp/skill-test-c5.ok"]
 [tasks."skill:test:c6"]
 description = "Focused C6 hardening+cert guards"
 run = "./scripts/skill_test_c6.sh"
-sources = ["scripts/skill_test_c6.sh", "scripts/skill_docs_drift.sh", "mise.toml", "docs/**/*.md", "AGENTS.md", "spec-0/04-htn.jsonl"]
+sources = ["scripts/skill_test_c6.sh", "scripts/skill_docs_drift.sh", "scripts/db_check.sh", "cmd/virmux/cwd_parallel_guard_test.go", "cmd/virmux/db_check_script_test.go", "cmd/virmux/export_import.go", "cmd/virmux/export_import_test.go", "internal/skill/run/core_test.go", "mise.toml", "docs/**/*.md", "AGENTS.md", "spec-0/04-htn.jsonl", "spec-0/05/cli-map.jsonl", "spec-0/05/56-c6-portability-hardening.jsonl", "spec-0/05/c0-data-map.jsonl"]
 outputs = ["tmp/skill-test-c6.ok", "tmp/skill-docs-drift.ok"]
 
 [tasks."skill:test"]

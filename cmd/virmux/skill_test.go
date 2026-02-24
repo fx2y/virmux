@@ -226,7 +226,6 @@ func TestCmdSkillPromoteWritesTagAndPromotionRow(t *testing.T) {
 }
 
 func TestCmdSkillRefineCreatesBranchCommitArtifactsAndAuditRow(t *testing.T) {
-	t.Parallel()
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	if err := os.MkdirAll(repo, 0o755); err != nil {
@@ -394,7 +393,6 @@ func TestCmdSkillRefineCreatesBranchCommitArtifactsAndAuditRow(t *testing.T) {
 }
 
 func TestCmdSkillRefineRejectsLargePatch(t *testing.T) {
-	t.Parallel()
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	if err := os.MkdirAll(repo, 0o755); err != nil {

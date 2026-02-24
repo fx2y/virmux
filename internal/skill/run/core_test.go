@@ -32,7 +32,6 @@ func TestLoadFixtureShellExecCmdShortcut(t *testing.T) {
 }
 
 func TestResolveFixturePathPrefersExistingRepoRelative(t *testing.T) {
-	t.Parallel()
 	root := t.TempDir()
 	skillDir := filepath.Join(root, "skills", "dd")
 	if err := os.MkdirAll(filepath.Join(skillDir, "tests"), 0o755); err != nil {

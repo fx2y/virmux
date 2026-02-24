@@ -9,43 +9,6 @@ if [[ ! -f "$db" ]]; then
   exit 1
 fi
 
-# Bridge legacy local DBs to current schema before invariant checks.
-sqlite3 "$db" <<'SQL' >/dev/null
-CREATE TABLE IF NOT EXISTS tool_calls (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id TEXT NOT NULL,
-  seq INTEGER NOT NULL,
-  req_id INTEGER NOT NULL DEFAULT 0,
-  tool TEXT NOT NULL,
-  input_hash TEXT NOT NULL,
-  output_hash TEXT NOT NULL,
-  input_ref TEXT NOT NULL DEFAULT '',
-  output_ref TEXT NOT NULL DEFAULT '',
-  stdout_ref TEXT NOT NULL DEFAULT '',
-  stderr_ref TEXT NOT NULL DEFAULT '',
-  rc INTEGER NOT NULL DEFAULT 0,
-  dur_ms INTEGER NOT NULL DEFAULT 0,
-  bytes_in INTEGER NOT NULL DEFAULT 0,
-  bytes_out INTEGER NOT NULL DEFAULT 0,
-  error_code TEXT NOT NULL DEFAULT '',
-  FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_tool_calls_run_seq ON tool_calls(run_id,seq);
-CREATE INDEX IF NOT EXISTS idx_tool_calls_tool_input_hash ON tool_calls(tool,input_hash);
-CREATE TABLE IF NOT EXISTS suggest_runs (
-  id TEXT PRIMARY KEY,
-  skill TEXT NOT NULL,
-  motif_key TEXT NOT NULL,
-  branch TEXT NOT NULL,
-  commit_sha TEXT NOT NULL,
-  pr_body_hash TEXT NOT NULL,
-  pr_body_path TEXT NOT NULL DEFAULT '',
-  run_ids_json TEXT NOT NULL DEFAULT '[]',
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_suggest_runs_skill_created ON suggest_runs(skill,created_at);
-SQL
-
 journal_mode="$(sqlite3 "$db" 'PRAGMA journal_mode;' | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
 if [[ "$journal_mode" != "wal" ]]; then
   echo "db:check: WAL required, got $journal_mode" >&2
@@ -61,9 +24,10 @@ fi
 
 required_indexes=(idx_events_run_id idx_runs_started_at idx_artifacts_run_id idx_tool_calls_run_seq idx_tool_calls_tool_input_hash)
 required_indexes+=(idx_scores_run_created idx_scores_skill_pass idx_judge_runs_run_created)
+required_indexes+=(idx_judge_runs_skill_created_mode)
 required_indexes+=(idx_eval_runs_skill_created idx_eval_runs_cohort_created idx_eval_cases_run_fixture idx_promotions_skill_created)
 required_indexes+=(idx_refine_runs_run_created idx_refine_runs_skill_created)
-required_indexes+=(idx_suggest_runs_skill_created)
+required_indexes+=(idx_suggest_runs_skill_created idx_experiments_skill_created idx_comparisons_experiment_fixture idx_canary_runs_skill_created idx_canary_runs_eval_run)
 for idx in "${required_indexes[@]}"; do
   c="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='$idx';")"
   if [[ "$c" != "1" ]]; then
@@ -88,6 +52,12 @@ refine_runs_table="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE typ
 [[ "$refine_runs_table" == "1" ]] || { echo "db:check: missing table: refine_runs" >&2; exit 1; }
 suggest_runs_table="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='suggest_runs';")"
 [[ "$suggest_runs_table" == "1" ]] || { echo "db:check: missing table: suggest_runs" >&2; exit 1; }
+experiments_table="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='experiments';")"
+[[ "$experiments_table" == "1" ]] || { echo "db:check: missing table: experiments" >&2; exit 1; }
+comparisons_table="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='comparisons';")"
+[[ "$comparisons_table" == "1" ]] || { echo "db:check: missing table: comparisons" >&2; exit 1; }
+canary_runs_table="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='canary_runs';")"
+[[ "$canary_runs_table" == "1" ]] || { echo "db:check: missing table: canary_runs" >&2; exit 1; }
 
 tool_rows="$(sqlite3 "$db" "SELECT COUNT(*) FROM tool_calls;")"
 if [[ "$tool_rows" != "0" ]]; then

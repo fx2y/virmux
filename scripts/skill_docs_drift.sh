@@ -15,7 +15,7 @@ if rg -n "skills/<name>/\{prompt\.md|prompt\.md\s+# behavior" "${docs[@]}" >/dev
   echo "skill:docs-drift: stale skill canon claim (prompt.md as primary) in RFC docs" >&2
   exit 1
 fi
-if rg -n "ghostfleet (judge run|ab run|promote skill@|skill refine suggest)" "${docs[@]}" >/dev/null; then
+if rg -n "ghostfleet (eval run|judge run|ab run|promote( skill@)?|rollback|skill refine suggest)" "${docs[@]}" >/dev/null; then
   echo "skill:docs-drift: stale command examples (non-canonical skill subcommands) in RFC docs" >&2
   exit 1
 fi
@@ -37,8 +37,20 @@ rg -n -F "\"id\":\"map.cli.ghostfleet->virmux\"" spec-0/05/cli-map.jsonl >/dev/n
   echo "skill:docs-drift: missing spec-05 translation map id" >&2
   exit 1
 }
+rg -n "db:check validator-only" spec-0/05/56-c6-portability-hardening.jsonl >/dev/null || {
+  echo "skill:docs-drift: missing C6 db:check validator-only anchor" >&2
+  exit 1
+}
+rg -n "eval_runs,eval_cases,promotions,experiments,comparisons,suggest_runs" spec-0/05/c0-data-map.jsonl >/dev/null || {
+  echo "skill:docs-drift: missing C0 bundle scope anchor" >&2
+  exit 1
+}
 rg -n "trace\\.ndjson" AGENTS.md >/dev/null || {
   echo "skill:docs-drift: missing trace.ndjson canon in AGENTS.md" >&2
+  exit 1
+}
+rg -n "SKILL\\.md.*SoT" AGENTS.md >/dev/null || {
+  echo "skill:docs-drift: missing SKILL.md canon in AGENTS.md" >&2
   exit 1
 }
 

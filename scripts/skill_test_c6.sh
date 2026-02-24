@@ -5,6 +5,7 @@ root="$(git rev-parse --show-toplevel)"
 cd "$root"
 
 ./scripts/skill_docs_drift.sh
+go test ./cmd/virmux -run 'Test(DBCheckFailsHashMismatchWithoutMutation|DBCheckFailsMissingSchemaWithoutCreatingTables|ExportImportEvalBundleRoundTrip|NoParallelInTestsThatChdir|SkillDocsDriftScript)' -count=1
 
 # Keep release-lane isolation hard: ship:core must not depend on skill lanes.
 ship_core_block="$(awk '

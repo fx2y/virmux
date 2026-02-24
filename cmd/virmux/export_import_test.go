@@ -312,3 +312,192 @@ func TestValidateSymlinkTargetAllowsInTreeRelative(t *testing.T) {
 		t.Fatalf("expected '.' symlink target rejection")
 	}
 }
+
+func TestExportImportEvalBundleRoundTrip(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("zstd"); err != nil {
+		t.Skip("zstd not installed")
+	}
+	tmp := t.TempDir()
+	runsDir := filepath.Join(tmp, "runs")
+	dbPath := filepath.Join(runsDir, "virmux.sqlite")
+
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	evalID := "ab-eval-bundle"
+	created := time.Date(2026, 2, 24, 0, 0, 0, 0, time.UTC)
+	if err := st.InsertEvalRun(ctx, store.EvalRun{
+		ID:            evalID,
+		Skill:         "dd",
+		Cohort:        "qa-skill-c6",
+		BaseRef:       "base",
+		HeadRef:       "head",
+		Provider:      "openai:gpt-4.1-mini",
+		FixturesHash:  "sha256:fixtures",
+		CfgSHA256:     "sha256:cfg",
+		CfgPath:       "runs/ab-eval-bundle/eval/cfg.json",
+		ResultsSHA256: "sha256:res",
+		ResultsPath:   "runs/ab-eval-bundle/eval/results.json",
+		VerdictSHA256: "sha256:verdict",
+		VerdictPath:   "runs/ab-eval-bundle/eval/verdict.json",
+		ScoreP50Base:  0.4,
+		ScoreP50Head:  0.8,
+		FailRateBase:  0.2,
+		FailRateHead:  0.0,
+		CostTotalBase: 1.2,
+		CostTotalHead: 1.3,
+		ScoreP50Delta: 0.4,
+		FailRateDelta: -0.2,
+		CostDelta:     0.1,
+		Pass:          true,
+		VerdictJSON:   `{"pass":true}`,
+		CreatedAt:     created,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertEvalCase(ctx, store.EvalCase{
+		EvalRunID: evalID,
+		FixtureID: "fx-01",
+		BaseScore: 0.3,
+		HeadScore: 0.9,
+		BasePass:  false,
+		HeadPass:  true,
+		BaseCost:  0.4,
+		HeadCost:  0.5,
+		CreatedAt: created,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertExperiment(ctx, store.Experiment{
+		ID:        evalID,
+		Skill:     "dd",
+		BaseRef:   "base",
+		HeadRef:   "head",
+		CreatedAt: created,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertComparison(ctx, store.Comparison{
+		ExperimentID: evalID,
+		FixtureID:    "fx-01",
+		Winner:       "B",
+		Rationale:    `{"policy":"anti-tie"}`,
+		CreatedAt:    created,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertPromotion(ctx, store.Promotion{
+		ID:            "promo-eval-bundle",
+		Skill:         "dd",
+		Tag:           "skill/dd/prod",
+		BaseRef:       "base",
+		HeadRef:       "head",
+		FromRef:       "base",
+		ToRef:         "head",
+		Reason:        "c6 eval bundle test",
+		MetricsJSON:   `{"wr":0.66}`,
+		CommitSHA:     "deadbeef",
+		Op:            "promote",
+		EvalRunID:     evalID,
+		VerdictSHA256: "sha256:verdict",
+		Actor:         "test",
+		CreatedAt:     created,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertSuggestRun(ctx, store.SuggestRun{
+		ID:         "suggest-eval-bundle",
+		Skill:      "dd",
+		MotifKey:   "motif",
+		Branch:     "suggest/dd/x",
+		CommitSHA:  "cafebabe",
+		PRBodyHash: "sha256:pr",
+		PRBodyPath: "runs/ab-eval-bundle/suggest/pr.md",
+		RunIDsJSON: `["rid-a","rid-b"]`,
+		CreatedAt:  created,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertCanaryRun(ctx, store.CanaryRun{
+		ID:               evalID + "-canary",
+		Skill:            "dd",
+		EvalRunID:        evalID,
+		CuratedEvalRunID: evalID,
+		DsetPath:         "dsets/prod_20260224.jsonl",
+		DsetSHA256:       "sha256:dset",
+		DsetCount:        2,
+		CandidateRef:     "head",
+		BaselineRef:      "base",
+		GateVerdictJSON:  `{"pass":true}`,
+		Action:           "promote",
+		ActionRef:        "head",
+		CaughtByCanary:   false,
+		SummaryPath:      "runs/ab-eval-bundle/canary-summary.json",
+		CreatedAt:        created,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+
+	b1 := filepath.Join(tmp, "eval1.tar.zst")
+	b2 := filepath.Join(tmp, "eval2.tar.zst")
+	if err := exportEvalBundle(context.Background(), dbPath, evalID, b1); err != nil {
+		t.Fatalf("export eval #1: %v", err)
+	}
+	if err := exportEvalBundle(context.Background(), dbPath, evalID, b2); err != nil {
+		t.Fatalf("export eval #2: %v", err)
+	}
+	raw1, err := os.ReadFile(b1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw2, err := os.ReadFile(b2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw1, raw2) {
+		t.Fatalf("deterministic eval export mismatch")
+	}
+
+	importRuns := filepath.Join(tmp, "runs-import")
+	importDB := filepath.Join(importRuns, "virmux.sqlite")
+	if err := importRunBundle(context.Background(), b1, importDB, importRuns); err != nil {
+		t.Fatalf("import eval bundle: %v", err)
+	}
+	ist, err := store.Open(importDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ist.Close()
+	var evalCount int
+	if err := ist.DB().QueryRow(`SELECT COUNT(*) FROM eval_runs WHERE id=?`, evalID).Scan(&evalCount); err != nil {
+		t.Fatal(err)
+	}
+	if evalCount != 1 {
+		t.Fatalf("expected 1 eval_run row, got %d", evalCount)
+	}
+	var cmpCount int
+	if err := ist.DB().QueryRow(`SELECT COUNT(*) FROM comparisons WHERE experiment_id=?`, evalID).Scan(&cmpCount); err != nil {
+		t.Fatal(err)
+	}
+	if cmpCount != 1 {
+		t.Fatalf("expected 1 comparison row, got %d", cmpCount)
+	}
+	var promoCount int
+	if err := ist.DB().QueryRow(`SELECT COUNT(*) FROM promotions WHERE eval_run_id=?`, evalID).Scan(&promoCount); err != nil {
+		t.Fatal(err)
+	}
+	if promoCount != 1 {
+		t.Fatalf("expected 1 promotion row, got %d", promoCount)
+	}
+	var canaryCount int
+	if err := ist.DB().QueryRow(`SELECT COUNT(*) FROM canary_runs WHERE eval_run_id=?`, evalID).Scan(&canaryCount); err != nil {
+		t.Fatal(err)
+	}
+	if canaryCount != 1 {
+		t.Fatalf("expected 1 canary row, got %d", canaryCount)
+	}
+}
