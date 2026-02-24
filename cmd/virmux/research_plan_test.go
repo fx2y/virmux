@@ -51,15 +51,34 @@ func TestResearchPlanWritesPlanYAML(t *testing.T) {
 	w.Close()
 	os.Stdout = oldStdout
 	
-	out, _ := ioutil.ReadAll(r)
+	outBytes, _ := ioutil.ReadAll(r)
+	out := string(outBytes)
+	lines := strings.Split(out, "\n")
 	var summary map[string]any
-	if err := json.Unmarshal(out, &summary); err != nil {
-		t.Fatalf("failed to parse summary json: %v\noutput: %s", err, out)
+	var parseErr error
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		if err := json.Unmarshal([]byte(line), &summary); err == nil {
+			parseErr = nil
+			break
+		} else {
+			parseErr = err
+		}
+	}
+	if summary == nil {
+		t.Fatalf("failed to find summary json: %v\noutput: %s", parseErr, out)
 	}
 
-	runDir, ok := summary["run_dir"].(string)
+	runDirVal, ok := summary["run_dir"].(string)
 	if !ok {
 		t.Fatalf("summary missing run_dir: %v", summary)
+	}
+	runDir := runDirVal
+	if !filepath.IsAbs(runDir) && !strings.HasPrefix(runDir, repo) {
+		runDir = filepath.Join(repo, runDir)
 	}
 
 	planPath := filepath.Join(runDir, "plan.yaml")

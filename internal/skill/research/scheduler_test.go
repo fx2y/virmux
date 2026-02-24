@@ -37,7 +37,7 @@ func TestSchedulerTopo(t *testing.T) {
 		},
 	}
 
-	states, err := s.Run(context.Background(), plan, "test-run")
+	states, err := s.Run(context.Background(), plan, "test-run", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestSchedulerFailure(t *testing.T) {
 		},
 	}
 
-	states, _ := s.Run(context.Background(), plan, "test-run")
+	states, _ := s.Run(context.Background(), plan, "test-run", nil)
 	// Since we use errgroup, the first error cancels the context of others.
 	// But our scheduler loop might have already started some.
 

@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/haris/virmux/internal/agent"
@@ -28,10 +30,119 @@ func cmdResearch(args []string) error {
 		return cmdResearchReduce(args[1:])
 	case "run":
 		return cmdResearchRun(args[1:])
+	case "replay":
+		return cmdResearchReplay(args[1:])
+	case "timeline":
+		return cmdResearchTimeline(args[1:])
 	default:
 		return fmt.Errorf("unknown research subcommand: %s", args[0])
 	}
 }
+
+func cmdResearchTimeline(args []string) error {
+	fs, cfg, _ := commonFlags("research timeline")
+	runID := fs.String("run", "", "run id to view timeline (last one if empty)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *runID == "" {
+		latest, err := findLatestRunDir(cfg.runsDir)
+		if err != nil {
+			return err
+		}
+		*runID = filepath.Base(latest)
+	}
+
+	tracePath := filepath.Join(cfg.runsDir, *runID, "trace.ndjson")
+	data, err := os.ReadFile(tracePath)
+	if err != nil {
+		return err
+	}
+
+	lines := strings.Split(string(data), "\n")
+	fmt.Printf("Timeline for run %s:\n", *runID)
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		var ev struct {
+			TS      time.Time      `json:"ts"`
+			Type    string         `json:"type"`
+			Event   string         `json:"event"`
+			Payload map[string]any `json:"payload"`
+		}
+		if err := json.Unmarshal([]byte(line), &ev); err == nil {
+			if strings.HasPrefix(ev.Event, "research.") {
+				fmt.Printf("[%s] %-30s %v\n", ev.TS.Format("15:04:05"), ev.Event, ev.Payload)
+			}
+		} else {
+			// fallback if ts is not standard
+			var ev2 struct {
+				Event   string         `json:"event"`
+				Payload map[string]any `json:"payload"`
+			}
+			if err := json.Unmarshal([]byte(line), &ev2); err == nil {
+				if strings.HasPrefix(ev2.Event, "research.") {
+					fmt.Printf("[--:--:--] %-30s %v\n", ev2.Event, ev2.Payload)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func cmdResearchReplay(args []string) error {
+	fs, cfg, _ := commonFlags("research replay")
+	runID := fs.String("run", "", "run id to replay (last one if empty)")
+	only := fs.String("only", "", "comma-separated list of track ids to rerun")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *runID == "" {
+		latest, err := findLatestRunDir(cfg.runsDir)
+		if err != nil {
+			return err
+		}
+		*runID = filepath.Base(latest)
+	}
+
+	onlyList := []string{}
+	if *only != "" {
+		onlyList = strings.Split(*only, ",")
+	}
+
+	return runWithStore(cfg, "research:replay", map[string]any{"target_run_id": *runID, "only": onlyList}, func(ctx context.Context, st *store.Store, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
+		cacheDir := filepath.Join(os.Getenv("HOME"), ".cache", "virmux", "research")
+		mapper := &research.DefaultMapper{
+			RunsDir:  cfg.runsDir,
+			CacheDir: cacheDir,
+			Store:    st,
+		}
+		scheduler := &research.DefaultScheduler{
+			Mapper: mapper,
+			Emitter: func(event string, payload map[string]any) error {
+				return emitVM(event, payload)
+			},
+		}
+
+		replayer := &research.DefaultReplay{
+			RunsDir:   cfg.runsDir,
+			Store:     st,
+			Scheduler: scheduler,
+			Emitter: func(event string, payload map[string]any) error {
+				return emitVM(event, payload)
+			},
+		}
+
+		output, err := replayer.Run(ctx, research.ReplayInput{RunID: *runID, Only: onlyList})
+		if err != nil {
+			return vm.Outcome{}, nil, err
+		}
+
+		return vm.Outcome{}, map[string]any{"run_id": output.RunID}, nil
+	}, defaultRunRuntime)
+}
+
 
 func cmdResearchRun(args []string) error {
 	fs, cfg, timeoutSec := commonFlags("research run")
@@ -71,7 +182,7 @@ func cmdResearchRun(args []string) error {
 			},
 		}
 		runID := filepath.Base(runDir)
-		_, err = scheduler.Run(ctx, planOutput.Plan, runID)
+		_, err = scheduler.Run(ctx, planOutput.Plan, runID, nil)
 		if err != nil {
 			return vm.Outcome{}, nil, fmt.Errorf("scheduler: %w", err)
 		}
@@ -168,7 +279,7 @@ func cmdResearchMap(args []string) error {
 
 		// 3. Run scheduler
 		fmt.Printf("Starting research map for run %s (plan %s)\n", *runID, plan.PlanID)
-		states, err := scheduler.Run(ctx, plan, *runID)
+		states, err := scheduler.Run(ctx, plan, *runID, nil)
 		if err != nil {
 			return vm.Outcome{}, nil, fmt.Errorf("scheduler run: %w", err)
 		}

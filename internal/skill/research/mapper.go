@@ -239,7 +239,7 @@ func (m *DefaultMapper) runDeepTrack(ctx context.Context, track *Track) (MapTrac
 			{
 				TrackID:  track.ID,
 				OK:       true,
-				Data:     map[string]any{"result": fmt.Sprintf("stub result for %s", track.Q)},
+				Data:     map[string]any{"result": fmt.Sprintf("stub result for %s at %v", track.Q, time.Now())},
 				Evidence: []string{"https://example.com/deep/result"},
 			},
 		},

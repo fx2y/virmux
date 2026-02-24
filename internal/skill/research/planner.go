@@ -27,8 +27,9 @@ type Track struct {
 	Attrs    []string    `yaml:"attrs,omitempty"`
 	Schema   TrackSchema `yaml:"schema"`
 	Budget   PlanBudget  `yaml:"budget"`
-	StopRule string      `yaml:"stop_rule"`
-	Deps     []string    `yaml:"deps"`
+	StopRule      string      `yaml:"stop_rule"`
+	Deps          []string    `yaml:"deps"`
+	Deterministic *bool       `yaml:"deterministic,omitempty"`
 }
 
 type ReduceConfig struct {

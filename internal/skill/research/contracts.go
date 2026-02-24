@@ -42,9 +42,26 @@ type Planner interface {
 	Compile(context.Context, PlanInput) (PlanOutput, error)
 }
 
-// Scheduler computes deterministic track execution ordering.
+// Scheduler computes deterministic track execution ordering and executes them.
 type Scheduler interface {
 	Build(context.Context, ScheduleInput) (ScheduleOutput, error)
+	Run(ctx context.Context, plan *Plan, runID string, only []string) ([]TrackState, error)
+}
+
+type TrackStatus string
+
+const (
+	TrackPending TrackStatus = "pending"
+	TrackRunning TrackStatus = "running"
+	TrackDone    TrackStatus = "done"
+	TrackFailed  TrackStatus = "failed"
+	TrackBlocked TrackStatus = "blocked"
+)
+
+type TrackState struct {
+	TrackID string      `json:"track_id"`
+	Status  TrackStatus `json:"status"`
+	Error   string      `json:"error,omitempty"`
 }
 
 // Mapper executes track work and emits only schema rows/evidence references.
@@ -88,6 +105,7 @@ type PlanOutput struct {
 
 type ScheduleInput struct {
 	PlanID string
+	Only   []string
 }
 
 type ScheduleOutput struct {

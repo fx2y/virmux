@@ -3,27 +3,13 @@ package research
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 )
-
-type TrackStatus string
-
-const (
-	TrackPending TrackStatus = "pending"
-	TrackRunning TrackStatus = "running"
-	TrackDone    TrackStatus = "done"
-	TrackFailed  TrackStatus = "failed"
-	TrackBlocked TrackStatus = "blocked"
-)
-
-type TrackState struct {
-	TrackID string      `json:"track_id"`
-	Status  TrackStatus `json:"status"`
-	Error   string      `json:"error,omitempty"`
-}
 
 type DefaultScheduler struct {
 	MaxConcurrency int64
@@ -55,19 +41,24 @@ func (s *DefaultScheduler) Build(ctx context.Context, input ScheduleInput) (Sche
 }
 
 // Run executes the plan's tracks according to their dependencies.
-func (s *DefaultScheduler) Run(ctx context.Context, plan *Plan, runID string) ([]TrackState, error) {
+func (s *DefaultScheduler) Run(ctx context.Context, plan *Plan, runID string, only []string) ([]TrackState, error) {
 	if s.MaxConcurrency <= 0 {
 		s.MaxConcurrency = 4
 	}
 	sem := semaphore.NewWeighted(s.MaxConcurrency)
 	
-	return s.runConcurrent(ctx, plan, runID, sem)
+	return s.runConcurrent(ctx, plan, runID, sem, only)
 }
 
-func (s *DefaultScheduler) runConcurrent(ctx context.Context, plan *Plan, runID string, sem *semaphore.Weighted) ([]TrackState, error) {
+func (s *DefaultScheduler) runConcurrent(ctx context.Context, plan *Plan, runID string, sem *semaphore.Weighted, only []string) ([]TrackState, error) {
 	states := make(map[string]*TrackState)
 	adj := make(map[string][]string)
 	inDegree := make(map[string]int)
+
+	onlyMap := make(map[string]bool)
+	for _, id := range only {
+		onlyMap[id] = true
+	}
 
 	for _, t := range plan.Tracks {
 		states[t.ID] = &TrackState{TrackID: t.ID, Status: TrackPending}
@@ -77,12 +68,43 @@ func (s *DefaultScheduler) runConcurrent(ctx context.Context, plan *Plan, runID 
 		}
 	}
 
+	// If we are only running a subset, mark everything else as "Done" if it was already successful
+	if len(onlyMap) > 0 {
+		for _, t := range plan.Tracks {
+			if !onlyMap[t.ID] {
+				// Check if artifact exists
+				mapDir := filepath.Join(s.Mapper.(*DefaultMapper).RunsDir, runID, "map")
+				trackPath := filepath.Join(mapDir, fmt.Sprintf("%s.jsonl", t.ID))
+				if _, err := os.Stat(trackPath); err == nil {
+					states[t.ID].Status = TrackDone
+					// Update inDegree for dependents
+					for _, dependent := range adj[t.ID] {
+						inDegree[dependent]--
+					}
+				} else {
+					// It's not in our 'only' list AND it's not already done.
+					// This might be an error or we should just treat it as blocked?
+					// For replay, usually we only replay what we want.
+					states[t.ID].Status = TrackBlocked
+					states[t.ID].Error = "not in rerun set and no artifact found"
+				}
+			}
+		}
+	}
+
 	var mu sync.Mutex
 	cond := sync.NewCond(&mu)
 	g, ctx := errgroup.WithContext(ctx)
 
 	completedCount := 0
 	totalTracks := len(plan.Tracks)
+
+	// Count already Done/Blocked tracks
+	for _, state := range states {
+		if state.Status == TrackDone || state.Status == TrackBlocked {
+			completedCount++
+		}
+	}
 
 	for {
 		mu.Lock()

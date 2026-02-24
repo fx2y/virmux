@@ -64,10 +64,16 @@ func (r *DefaultReducer) Run(ctx context.Context, input ReduceInput) (ReduceOutp
 		return ReduceOutput{}, fmt.Errorf("mkdir reduce: %w", err)
 	}
 
+	mismatches := make(map[string][]string)
+	mismatchPath := filepath.Join(r.RunsDir, input.RunID, "mismatch.json")
+	if b, err := os.ReadFile(mismatchPath); err == nil {
+		_ = json.Unmarshal(b, &mismatches)
+	}
+
 	if err := r.writeCSV(reduceDir, cited); err != nil {
 		return ReduceOutput{}, err
 	}
-	if err := r.writeReport(reduceDir, cited, uncited); err != nil {
+	if err := r.writeReport(reduceDir, cited, uncited, mismatches); err != nil {
 		return ReduceOutput{}, err
 	}
 	if err := r.writeSlides(reduceDir, cited); err != nil {
@@ -119,7 +125,7 @@ func (r *DefaultReducer) writeCSV(dir string, rows []MapResultRow) error {
 	return nil
 }
 
-func (r *DefaultReducer) writeReport(dir string, cited, uncited []MapResultRow) error {
+func (r *DefaultReducer) writeReport(dir string, cited, uncited []MapResultRow, mismatches map[string][]string) error {
 	f, err := os.Create(filepath.Join(dir, "report.md"))
 	if err != nil {
 		return err
@@ -132,6 +138,15 @@ func (r *DefaultReducer) writeReport(dir string, cited, uncited []MapResultRow) 
 		fmt.Fprintf(f, "Found %d cited claims.\n\n", len(cited))
 	} else {
 		fmt.Fprintf(f, "No cited claims found.\n\n")
+	}
+
+	if len(mismatches) > 0 {
+		fmt.Fprintf(f, "## Contradictions\n\n")
+		fmt.Fprintf(f, "The following tracks showed mismatches during replay:\n\n")
+		for trackID, ms := range mismatches {
+			fmt.Fprintf(f, "- **%s**: %s\n", trackID, strings.Join(ms, "; "))
+		}
+		fmt.Fprintf(f, "\n")
 	}
 
 	fmt.Fprintf(f, "## Findings\n\n")
