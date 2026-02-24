@@ -148,7 +148,13 @@ type Promotion struct {
 	Tag           string
 	BaseRef       string
 	HeadRef       string
-	EvalRunID     string
+	FromRef       string
+	ToRef         string
+	Reason        string
+	MetricsJSON   string
+	CommitSHA     string
+	Op            string // "promote" or "rollback"
+	EvalRunID     string // Can be empty for rollbacks
 	VerdictSHA256 string
 	Actor         string
 	CreatedAt     time.Time
@@ -346,7 +352,13 @@ CREATE TABLE IF NOT EXISTS promotions (
   tag TEXT NOT NULL,
   base_ref TEXT NOT NULL,
   head_ref TEXT NOT NULL,
-  eval_run_id TEXT NOT NULL,
+  from_ref TEXT NOT NULL DEFAULT '',
+  to_ref TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  metrics_json TEXT NOT NULL DEFAULT '{}',
+  commit_sha TEXT NOT NULL DEFAULT '',
+  op TEXT NOT NULL DEFAULT 'promote',
+  eval_run_id TEXT,
   verdict_sha256 TEXT NOT NULL,
   actor TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
@@ -450,6 +462,24 @@ CREATE INDEX IF NOT EXISTS idx_comparisons_experiment_fixture ON comparisons(exp
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_judge_runs_skill_created_mode ON judge_runs(skill,created_at,mode)`); err != nil {
 		return fmt.Errorf("ensure idx_judge_runs_skill_created_mode: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE promotions ADD COLUMN from_ref TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("ensure promotions.from_ref: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE promotions ADD COLUMN to_ref TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("ensure promotions.to_ref: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE promotions ADD COLUMN reason TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("ensure promotions.reason: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE promotions ADD COLUMN metrics_json TEXT NOT NULL DEFAULT '{}'`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("ensure promotions.metrics_json: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE promotions ADD COLUMN commit_sha TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("ensure promotions.commit_sha: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE promotions ADD COLUMN op TEXT NOT NULL DEFAULT 'promote'`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("ensure promotions.op: %w", err)
 	}
 	return nil
 }
@@ -753,15 +783,28 @@ func (s *Store) InsertPromotion(ctx context.Context, row Promotion) error {
 	if row.CreatedAt.IsZero() {
 		row.CreatedAt = time.Now().UTC()
 	}
+	if row.Op == "" {
+		row.Op = "promote"
+	}
+	var evalRunID sql.NullString
+	if row.EvalRunID != "" {
+		evalRunID = sql.NullString{String: row.EvalRunID, Valid: true}
+	}
 	_, err := s.db.ExecContext(
 		ctx,
-		`INSERT INTO promotions(id,skill,tag,base_ref,head_ref,eval_run_id,verdict_sha256,actor,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO promotions(id,skill,tag,base_ref,head_ref,from_ref,to_ref,reason,metrics_json,commit_sha,op,eval_run_id,verdict_sha256,actor,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		row.ID,
 		row.Skill,
 		row.Tag,
 		row.BaseRef,
 		row.HeadRef,
-		row.EvalRunID,
+		row.FromRef,
+		row.ToRef,
+		row.Reason,
+		row.MetricsJSON,
+		row.CommitSHA,
+		row.Op,
+		evalRunID,
 		row.VerdictSHA256,
 		row.Actor,
 		row.CreatedAt.UTC().Format(time.RFC3339Nano),

@@ -9,6 +9,7 @@ import (
 
 	skillpkg "github.com/haris/virmux/internal/skill"
 	"github.com/haris/virmux/internal/skill/eval"
+	"github.com/haris/virmux/internal/skill/gates"
 	"github.com/haris/virmux/internal/store"
 )
 
@@ -31,6 +32,10 @@ type Input struct {
 	Tag         string
 	Actor       string
 	MaxAgeHours int
+	Rollback    bool
+	ToRef       string // Target ref for rollback
+	Reason      string
+	DryRun      bool
 }
 
 type Result struct {
@@ -40,15 +45,18 @@ type Result struct {
 	EvalRunID string
 	BaseRef   string
 	HeadRef   string
+	FromRef   string
+	ToRef     string
 	Actor     string
+	Op        string
 }
 
 func (s Service) Run(ctx context.Context, in Input) (Result, error) {
 	if s.Store == nil {
 		return Result{}, errors.New("promote store required")
 	}
-	if strings.TrimSpace(in.SkillName) == "" || strings.TrimSpace(in.EvalRunID) == "" {
-		return Result{}, errors.New("skill and eval-run-id are required")
+	if strings.TrimSpace(in.SkillName) == "" {
+		return Result{}, errors.New("skill is required")
 	}
 	now := time.Now
 	if s.Now != nil {
@@ -58,58 +66,129 @@ func (s Service) Run(ctx context.Context, in Input) (Result, error) {
 	if ex == nil {
 		ex = eval.OSExec{}
 	}
-	row, err := s.Store.GetEvalRun(ctx, in.EvalRunID)
-	if err != nil {
-		return Result{}, fmt.Errorf("MISSING_AB_VERDICT: %w", err)
-	}
-	if row.Skill != in.SkillName {
-		return Result{}, fmt.Errorf("MISSING_AB_VERDICT: eval run skill=%s does not match %s", row.Skill, in.SkillName)
-	}
-	if !row.Pass {
-		return Result{}, fmt.Errorf("MISSING_AB_VERDICT: eval run %s is not passing", in.EvalRunID)
-	}
-	maxAge := time.Duration(in.MaxAgeHours) * time.Hour
-	if maxAge > 0 && !row.CreatedAt.IsZero() && now().Sub(row.CreatedAt) > maxAge {
-		return Result{}, fmt.Errorf("STALE_AB_VERDICT: eval run %s older than %s", in.EvalRunID, maxAge)
-	}
+
 	promoTag := strings.TrimSpace(in.Tag)
 	if promoTag == "" {
 		promoTag = fmt.Sprintf("skill/%s/prod", in.SkillName)
 	}
+
 	actor := strings.TrimSpace(in.Actor)
 	if actor == "" {
 		if s.User != nil {
 			actor = strings.TrimSpace(s.User("USER"))
 		}
 	}
-	if _, err := ex.Run(ctx, skillpkg.Command{
-		Dir:  in.RepoDir,
-		Name: "git",
-		Args: []string{"tag", "-f", promoTag, row.HeadRef},
-	}); err != nil {
-		return Result{}, fmt.Errorf("move promotion tag: %w", err)
+
+	op := "promote"
+	var evalRun store.EvalRun
+	var fromRef, toRef, commitSHA string
+	var metricsJSON string
+	var verdictSHA string
+
+	if in.Rollback {
+		op = "rollback"
+		if in.ToRef == "" {
+			return Result{}, errors.New("rollback requires --to-ref")
+		}
+		toRef = in.ToRef
+
+		// Get current ref for fromRef
+		res, _ := ex.Run(ctx, skillpkg.Command{
+			Dir:  in.RepoDir,
+			Name: "git",
+			Args: []string{"rev-parse", promoTag},
+		})
+		fromRef = strings.TrimSpace(string(res.Stdout))
+
+		// Resolve toRef to commit SHA
+		res, err := ex.Run(ctx, skillpkg.Command{
+			Dir:  in.RepoDir,
+			Name: "git",
+			Args: []string{"rev-parse", toRef},
+		})
+		if err != nil {
+			return Result{}, fmt.Errorf("resolve rollback target %s: %w", toRef, err)
+		}
+		commitSHA = strings.TrimSpace(string(res.Stdout))
+	} else {
+		if strings.TrimSpace(in.EvalRunID) == "" {
+			return Result{}, errors.New("promote requires --eval-run-id")
+		}
+		var err error
+		evalRun, err = s.Store.GetEvalRun(ctx, in.EvalRunID)
+		if err != nil {
+			return Result{}, fmt.Errorf("MISSING_AB_VERDICT: %w", err)
+		}
+		if evalRun.Skill != in.SkillName {
+			return Result{}, fmt.Errorf("MISSING_AB_VERDICT: eval run skill=%s does not match %s", evalRun.Skill, in.SkillName)
+		}
+
+		// Use gate library
+		verdict := gates.GateEval(evalRun)
+		if !verdict.Pass {
+			return Result{}, fmt.Errorf("%s: %s", verdict.Refusal, verdict.Reason)
+		}
+
+		maxAge := time.Duration(in.MaxAgeHours) * time.Hour
+		if maxAge > 0 && !evalRun.CreatedAt.IsZero() && now().Sub(evalRun.CreatedAt) > maxAge {
+			return Result{}, fmt.Errorf("STALE_AB_VERDICT: eval run %s older than %s", in.EvalRunID, maxAge)
+		}
+
+		fromRef = evalRun.BaseRef
+		toRef = evalRun.HeadRef
+		commitSHA = evalRun.HeadRef
+		metricsJSON = evalRun.VerdictJSON
+		verdictSHA = evalRun.VerdictSHA256
 	}
-	promoID := fmt.Sprintf("%d-promote", now().UTC().UnixNano())
-	if err := s.Store.InsertPromotion(ctx, store.Promotion{
-		ID:            promoID,
-		Skill:         in.SkillName,
-		Tag:           promoTag,
-		BaseRef:       row.BaseRef,
-		HeadRef:       row.HeadRef,
-		EvalRunID:     row.ID,
-		VerdictSHA256: row.VerdictSHA256,
-		Actor:         actor,
-		CreatedAt:     now().UTC(),
-	}); err != nil {
-		return Result{}, err
+
+	// Execute git tag move
+	if !in.DryRun {
+		if _, err := ex.Run(ctx, skillpkg.Command{
+			Dir:  in.RepoDir,
+			Name: "git",
+			Args: []string{"tag", "-f", promoTag, commitSHA},
+		}); err != nil {
+			return Result{}, fmt.Errorf("failed to move tag %s to %s: %w", promoTag, commitSHA, err)
+		}
 	}
+
+	promoID := fmt.Sprintf("%d-%s", now().UTC().UnixNano(), op)
+	if in.DryRun {
+		promoID += "-dryrun"
+	}
+
+	if !in.DryRun {
+		if err := s.Store.InsertPromotion(ctx, store.Promotion{
+			ID:            promoID,
+			Skill:         in.SkillName,
+			Tag:           promoTag,
+			BaseRef:       evalRun.BaseRef,
+			HeadRef:       evalRun.HeadRef,
+			FromRef:       fromRef,
+			ToRef:         toRef,
+			Reason:        in.Reason,
+			MetricsJSON:   metricsJSON,
+			CommitSHA:     commitSHA,
+			Op:            op,
+			EvalRunID:     evalRun.ID,
+			VerdictSHA256: verdictSHA,
+			Actor:         actor,
+			CreatedAt:     now().UTC(),
+		}); err != nil {
+			return Result{}, err
+		}
+	}
+
 	return Result{
 		ID:        promoID,
 		Skill:     in.SkillName,
 		Tag:       promoTag,
-		EvalRunID: row.ID,
-		BaseRef:   row.BaseRef,
-		HeadRef:   row.HeadRef,
+		EvalRunID: evalRun.ID,
+		BaseRef:   evalRun.BaseRef,
+		HeadRef:   evalRun.HeadRef,
+		FromRef:   fromRef,
+		ToRef:     toRef,
 		Actor:     actor,
+		Op:        op,
 	}, nil
 }

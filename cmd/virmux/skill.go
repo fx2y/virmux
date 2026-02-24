@@ -861,14 +861,28 @@ func cmdSkillPromote(args []string) error {
 	tag := fs.String("tag", "", "promotion tag (default: skill/<name>/prod)")
 	actor := fs.String("actor", "", "actor id (default: $USER)")
 	maxAgeH := fs.Int("max-age-hours", 24, "max AB verdict age before stale refusal")
+	rollback := fs.Bool("rollback", false, "execute rollback instead of promotion")
+	toRef := fs.String("to-ref", "", "target ref for rollback")
+	reason := fs.String("reason", "", "reason for promotion/rollback")
+	dryRun := fs.Bool("dry-run", false, "dry run (check gates, skip tag/db update)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if len(fs.Args()) != 2 {
-		return errors.New("usage: virmux skill promote <skill> <eval-run-id>")
+
+	var skillName, evalID string
+	if *rollback {
+		if len(fs.Args()) != 1 {
+			return errors.New("usage: virmux skill promote --rollback --to-ref <ref> <skill>")
+		}
+		skillName = strings.TrimSpace(fs.Args()[0])
+	} else {
+		if len(fs.Args()) != 2 {
+			return errors.New("usage: virmux skill promote <skill> <eval-run-id>")
+		}
+		skillName = strings.TrimSpace(fs.Args()[0])
+		evalID = strings.TrimSpace(fs.Args()[1])
 	}
-	skillName := strings.TrimSpace(fs.Args()[0])
-	evalID := strings.TrimSpace(fs.Args()[1])
+
 	st, err := store.Open(*dbPath)
 	if err != nil {
 		return err
@@ -885,6 +899,10 @@ func cmdSkillPromote(args []string) error {
 		Tag:         *tag,
 		Actor:       *actor,
 		MaxAgeHours: *maxAgeH,
+		Rollback:    *rollback,
+		ToRef:       *toRef,
+		Reason:      *reason,
+		DryRun:      *dryRun,
 	})
 	if err != nil {
 		return err
@@ -896,7 +914,10 @@ func cmdSkillPromote(args []string) error {
 		"eval_run_id": res.EvalRunID,
 		"base_ref":    res.BaseRef,
 		"head_ref":    res.HeadRef,
+		"from_ref":    res.FromRef,
+		"to_ref":      res.ToRef,
 		"actor":       res.Actor,
+		"op":          res.Op,
 	}
 	b, _ := json.Marshal(out)
 	fmt.Println(string(b))

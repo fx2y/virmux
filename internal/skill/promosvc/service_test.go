@@ -16,16 +16,22 @@ type fakeExec struct {
 
 func (f *fakeExec) Run(_ context.Context, c skillpkg.Command) (skillpkg.CommandResult, error) {
 	f.last = c
+	if c.Name == "git" && len(c.Args) > 0 && c.Args[0] == "rev-parse" {
+		return skillpkg.CommandResult{ExitCode: 0, Stdout: []byte("sha-abc\n")}, nil
+	}
 	return skillpkg.CommandResult{ExitCode: 0}, nil
 }
 
-func seedEvalRun(t *testing.T, dbPath, id string, created time.Time) {
+func seedEvalRun(t *testing.T, dbPath, id string, created time.Time, pass bool, verdictJSON string) {
 	t.Helper()
 	st, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
+	if verdictJSON == "" {
+		verdictJSON = `{"pass":true}`
+	}
 	if err := st.InsertEvalRun(context.Background(), store.EvalRun{
 		ID:            id,
 		Skill:         "dd",
@@ -37,8 +43,8 @@ func seedEvalRun(t *testing.T, dbPath, id string, created time.Time) {
 		CfgSHA256:     "sha256:cfg",
 		ResultsSHA256: "sha256:res",
 		VerdictSHA256: "sha256:verdict",
-		VerdictJSON:   `{"pass":true}`,
-		Pass:          true,
+		VerdictJSON:   verdictJSON,
+		Pass:          pass,
 		CreatedAt:     created,
 	}); err != nil {
 		t.Fatal(err)
@@ -49,7 +55,7 @@ func TestServiceRunRefusesStaleVerdict(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	dbPath := tmp + "/runs/virmux.sqlite"
-	seedEvalRun(t, dbPath, "ab-stale", time.Now().UTC().Add(-48*time.Hour))
+	seedEvalRun(t, dbPath, "ab-stale", time.Now().UTC().Add(-48*time.Hour), true, "")
 
 	s := Service{Store: mustOpenStore(t, dbPath), Exec: &fakeExec{}, Now: time.Now}
 	_, err := s.Run(context.Background(), Input{SkillName: "dd", EvalRunID: "ab-stale", MaxAgeHours: 24})
@@ -58,11 +64,60 @@ func TestServiceRunRefusesStaleVerdict(t *testing.T) {
 	}
 }
 
+func TestServiceRunRefusesRegression(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	dbPath := tmp + "/runs/virmux.sqlite"
+	seedEvalRun(t, dbPath, "ab-fail", time.Now().UTC(), false, `{"pass":false,"hard":{"fail_rate":false}}`)
+
+	st := mustOpenStore(t, dbPath)
+	defer st.Close()
+	s := Service{Store: st, Exec: &fakeExec{}, Now: time.Now}
+	_, err := s.Run(context.Background(), Input{SkillName: "dd", EvalRunID: "ab-fail"})
+	if err == nil || !strings.Contains(err.Error(), "AB_REGRESSION") {
+		t.Fatalf("expected regression refusal, got %v", err)
+	}
+}
+
+func TestServiceRunRollback(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	dbPath := tmp + "/runs/virmux.sqlite"
+	st := mustOpenStore(t, dbPath)
+	defer st.Close()
+	ex := &fakeExec{}
+	s := Service{Store: st, Exec: ex, Now: func() time.Time { return time.Unix(1700000001, 0).UTC() }}
+	res, err := s.Run(context.Background(), Input{
+		SkillName: "dd",
+		Rollback:  true,
+		ToRef:     "tag-v1",
+		RepoDir:   tmp,
+		Reason:    "bug in head",
+	})
+	if err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if res.Op != "rollback" {
+		t.Fatalf("expected op=rollback, got %s", res.Op)
+	}
+	if res.ToRef != "tag-v1" {
+		t.Fatalf("target mismatch: %s", res.ToRef)
+	}
+	
+	var row store.Promotion
+	if err := st.DB().QueryRow(`SELECT id, op, from_ref, to_ref, reason FROM promotions WHERE id=?`, res.ID).Scan(&row.ID, &row.Op, &row.FromRef, &row.ToRef, &row.Reason); err != nil {
+		t.Fatal(err)
+	}
+	if row.Op != "rollback" || row.ToRef != "tag-v1" || row.Reason != "bug in head" {
+		t.Fatalf("db row mismatch: %+v", row)
+	}
+}
+
 func TestServiceRunWritesPromotionAndMovesTag(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	dbPath := tmp + "/runs/virmux.sqlite"
-	seedEvalRun(t, dbPath, "ab-pass", time.Now().UTC())
+	seedEvalRun(t, dbPath, "ab-pass", time.Now().UTC(), true, "")
 	st := mustOpenStore(t, dbPath)
 	defer st.Close()
 	ex := &fakeExec{}
