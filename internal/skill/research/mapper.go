@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/haris/virmux/internal/store"
-	yaml "gopkg.in/yaml.v2"
 )
 
 type MapResultRow struct {
@@ -81,9 +80,9 @@ func (m *DefaultMapper) Run(ctx context.Context, input MapInput) (MapOutput, err
 	if err != nil {
 		return MapOutput{}, fmt.Errorf("read plan: %w", err)
 	}
-	var plan Plan
-	if err := yaml.Unmarshal(planData, &plan); err != nil {
-		return MapOutput{}, fmt.Errorf("unmarshal plan: %w", err)
+	plan, err := ParsePlan(planData)
+	if err != nil {
+		return MapOutput{}, err
 	}
 
 	// 2. Find the track
@@ -239,7 +238,7 @@ func (m *DefaultMapper) runDeepTrack(ctx context.Context, track *Track) (MapTrac
 			{
 				TrackID:  track.ID,
 				OK:       true,
-				Data:     map[string]any{"result": fmt.Sprintf("stub result for %s at %v", track.Q, time.Now())},
+				Data:     map[string]any{"result": fmt.Sprintf("stub result for %s", track.Q)},
 				Evidence: []string{"https://example.com/deep/result"},
 			},
 		},

@@ -38,7 +38,8 @@ reports_count=$(echo "$sql_cert_json" | jq .reports_count)
 plan_ok=0
 [[ -f "$root/tmp/research-cert.ok" ]] && plan_ok=1
 
-parallel_ok=1 # Assumed from research-cert.ok passing
+parallel_ok=0
+[[ -f "$root/tmp/research-parallel.ok" ]] && parallel_ok=1
 
 reduce_ok=0
 [[ "$reports_count" -ge 1 ]] && reduce_ok=1
@@ -70,7 +71,7 @@ jq -n -S \
   --argjson docs_ok "$docs_ok" \
   '{cert_ts:$cert_ts,generated_at:$generated_at,dod:[
     {id:"DOD-S06-1",canon:"virmux research plan writes plan.yaml first",pass:($plan_ok==1),proof:["tmp/research-cert.ok","runs/<id>/plan.yaml"]},
-    {id:"DOD-S06-2",canon:"virmux research map runs in parallel with typed failures",pass:($parallel_ok==1),proof:["internal/skill/research/scheduler.go"]},
+    {id:"DOD-S06-2",canon:"virmux research map runs in parallel with typed failures",pass:($parallel_ok==1),proof:["tmp/research-parallel.ok","internal/skill/research/scheduler_test.go"]},
     {id:"DOD-S06-3",canon:"virmux research reduce is pure and produces artifacts",pass:($reduce_ok==1),proof:["runs/virmux.sqlite:artifacts","tmp/research-sql-cert-summary.json"],metrics:{reports:$reports_count}},
     {id:"DOD-S06-4",canon:"virmux research replay detects mismatches and supports bypass",pass:($replay_ok==1),proof:["tmp/research-cert.ok","runs/virmux.sqlite:runs"],metrics:{replay_runs:$replay_count}},
     {id:"DOD-S06-5",canon:"virmux export/import preserves research data",pass:($portability_ok==1),proof:["tmp/research-portability.ok","cmd/virmux/export_import.go"]},

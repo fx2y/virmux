@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -46,7 +47,7 @@ func cmdResearchTimeline(args []string) error {
 		return err
 	}
 	if *runID == "" {
-		latest, err := findLatestRunDir(cfg.runsDir)
+		latest, err := findLatestRunDirWithRequired(cfg.runsDir, "trace.ndjson")
 		if err != nil {
 			return err
 		}
@@ -99,7 +100,7 @@ func cmdResearchReplay(args []string) error {
 		return err
 	}
 	if *runID == "" {
-		latest, err := findLatestRunDir(cfg.runsDir)
+		latest, err := findLatestRunDirWithRequired(cfg.runsDir, "plan.yaml")
 		if err != nil {
 			return err
 		}
@@ -123,6 +124,7 @@ func cmdResearchReplay(args []string) error {
 			Emitter: func(event string, payload map[string]any) error {
 				return emitVM(event, payload)
 			},
+			TrackArtifactExists: researchTrackArtifactProbe(cfg.runsDir),
 		}
 
 		replayer := &research.DefaultReplay{
@@ -142,7 +144,6 @@ func cmdResearchReplay(args []string) error {
 		return vm.Outcome{}, map[string]any{"run_id": output.RunID}, nil
 	}, defaultRunRuntime)
 }
-
 
 func cmdResearchRun(args []string) error {
 	fs, cfg, timeoutSec := commonFlags("research run")
@@ -180,6 +181,7 @@ func cmdResearchRun(args []string) error {
 			Emitter: func(event string, payload map[string]any) error {
 				return emitVM(event, payload)
 			},
+			TrackArtifactExists: researchTrackArtifactProbe(cfg.runsDir),
 		}
 		runID := filepath.Base(runDir)
 		_, err = scheduler.Run(ctx, planOutput.Plan, runID, nil)
@@ -208,7 +210,7 @@ func cmdResearchReduce(args []string) error {
 		return err
 	}
 	if *runID == "" {
-		latest, err := findLatestRunDir(cfg.runsDir)
+		latest, err := findLatestRunDirWithRequired(cfg.runsDir, "map")
 		if err != nil {
 			return err
 		}
@@ -228,7 +230,7 @@ func cmdResearchReduce(args []string) error {
 
 		// Prepare summary details
 		details := map[string]any{
-			"run_id": output.RunID,
+			"run_id":     output.RunID,
 			"reduce_dir": filepath.Join(cfg.runsDir, *runID, "reduce"),
 		}
 
@@ -239,11 +241,12 @@ func cmdResearchReduce(args []string) error {
 func cmdResearchMap(args []string) error {
 	fs, cfg, _ := commonFlags("research map")
 	runID := fs.String("run", "", "run id to map (last one if empty)")
+	only := fs.String("only", "", "comma-separated list of track ids to run")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *runID == "" {
-		latest, err := findLatestRunDir(cfg.runsDir)
+		latest, err := findLatestRunDirWithRequired(cfg.runsDir, "plan.yaml")
 		if err != nil {
 			return err
 		}
@@ -251,8 +254,12 @@ func cmdResearchMap(args []string) error {
 	}
 
 	cacheDir := filepath.Join(os.Getenv("HOME"), ".cache", "virmux", "research")
+	onlyList := []string{}
+	if *only != "" {
+		onlyList = strings.Split(*only, ",")
+	}
 
-	return runWithStore(cfg, "research:map", map[string]any{"target_run_id": *runID}, func(ctx context.Context, st *store.Store, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
+	return runWithStore(cfg, "research:map", map[string]any{"target_run_id": *runID, "only": onlyList}, func(ctx context.Context, st *store.Store, art vm.Artifacts, meta agent.Meta, runDir string, emitVM vmEventEmitter) (vm.Outcome, map[string]any, error) {
 		// 1. Load plan.yaml from runs/<runID>/plan.yaml
 		planPath := filepath.Join(cfg.runsDir, *runID, "plan.yaml")
 		data, err := os.ReadFile(planPath)
@@ -275,11 +282,12 @@ func cmdResearchMap(args []string) error {
 			Emitter: func(event string, payload map[string]any) error {
 				return emitVM(event, payload)
 			},
+			TrackArtifactExists: researchTrackArtifactProbe(cfg.runsDir),
 		}
 
 		// 3. Run scheduler
 		fmt.Printf("Starting research map for run %s (plan %s)\n", *runID, plan.PlanID)
-		states, err := scheduler.Run(ctx, plan, *runID, nil)
+		states, err := scheduler.Run(ctx, plan, *runID, onlyList)
 		if err != nil {
 			return vm.Outcome{}, nil, fmt.Errorf("scheduler run: %w", err)
 		}
@@ -293,6 +301,7 @@ func cmdResearchMap(args []string) error {
 		details := map[string]any{
 			"plan_id": plan.PlanID,
 			"tracks":  len(plan.Tracks),
+			"only":    onlyList,
 			"results": states,
 		}
 
@@ -300,24 +309,50 @@ func cmdResearchMap(args []string) error {
 	}, defaultRunRuntime)
 }
 
+func researchTrackArtifactProbe(runsDir string) func(runID, trackID string) (bool, error) {
+	return func(runID, trackID string) (bool, error) {
+		p := filepath.Join(runsDir, runID, "map", trackID+".jsonl")
+		_, err := os.Stat(p)
+		if err == nil {
+			return true, nil
+		}
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+}
+
 func findLatestRunDir(runsDir string) (string, error) {
+	return findLatestRunDirWithRequired(runsDir)
+}
+
+func findLatestRunDirWithRequired(runsDir string, required ...string) (string, error) {
 	ents, err := os.ReadDir(runsDir)
 	if err != nil {
 		return "", err
 	}
-	var latest os.DirEntry
+	sort.Slice(ents, func(i, j int) bool { return ents[i].Name() > ents[j].Name() })
 	for _, e := range ents {
 		if !e.IsDir() {
 			continue
 		}
-		if latest == nil || e.Name() > latest.Name() {
-			latest = e
+		path := filepath.Join(runsDir, e.Name())
+		ok := true
+		for _, rel := range required {
+			if _, statErr := os.Stat(filepath.Join(path, rel)); statErr != nil {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return path, nil
 		}
 	}
-	if latest == nil {
+	if len(required) == 0 {
 		return "", errors.New("no runs found")
 	}
-	return filepath.Join(runsDir, latest.Name()), nil
+	return "", fmt.Errorf("no runs found with required artifacts: %s", strings.Join(required, ","))
 }
 
 func cmdResearchPlan(args []string) error {

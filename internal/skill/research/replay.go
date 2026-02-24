@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/haris/virmux/internal/store"
-	yaml "gopkg.in/yaml.v2"
 )
 
 type DefaultReplay struct {
@@ -33,9 +32,21 @@ func (r *DefaultReplay) Run(ctx context.Context, input ReplayInput) (ReplayOutpu
 	if err != nil {
 		return ReplayOutput{}, fmt.Errorf("read plan: %w", err)
 	}
-	var plan Plan
-	if err := yaml.Unmarshal(planData, &plan); err != nil {
-		return ReplayOutput{}, fmt.Errorf("unmarshal plan: %w", err)
+	plan, err := ParsePlan(planData)
+	if err != nil {
+		return ReplayOutput{}, err
+	}
+
+	if len(input.Only) > 0 {
+		trackIDs := make(map[string]struct{}, len(plan.Tracks))
+		for _, t := range plan.Tracks {
+			trackIDs[t.ID] = struct{}{}
+		}
+		for _, id := range input.Only {
+			if _, ok := trackIDs[id]; !ok {
+				return ReplayOutput{}, Failure{Code: FailureRerunSelector, Message: fmt.Sprintf("track %q not in plan", id)}
+			}
+		}
 	}
 
 	r.emit("research.replay.started", map[string]any{
@@ -49,7 +60,7 @@ func (r *DefaultReplay) Run(ctx context.Context, input ReplayInput) (ReplayOutpu
 	if len(input.Only) > 0 {
 		rerunIDs = input.Only
 	} else {
-		failed, err := r.findFailedTracks(input.RunID, &plan)
+		failed, err := r.findFailedTracks(input.RunID, plan)
 		if err != nil {
 			return ReplayOutput{}, err
 		}
@@ -75,7 +86,7 @@ func (r *DefaultReplay) Run(ctx context.Context, input ReplayInput) (ReplayOutpu
 	}
 
 	// 4. Run scheduler
-	states, err := r.Scheduler.Run(ctx, &plan, input.RunID, rerunIDs)
+	states, err := r.Scheduler.Run(ctx, plan, input.RunID, rerunIDs)
 	if err != nil {
 		return ReplayOutput{}, err
 	}
@@ -98,7 +109,7 @@ func (r *DefaultReplay) Run(ctx context.Context, input ReplayInput) (ReplayOutpu
 
 		newPath := filepath.Join(mapDir, id+".jsonl")
 		oldPath := filepath.Join(backupDir, id+".jsonl")
-		
+
 		if _, err := os.Stat(oldPath); err == nil {
 			mismatches := r.compareFiles(oldPath, newPath)
 			if len(mismatches) > 0 {
@@ -137,7 +148,7 @@ func (r *DefaultReplay) findFailedTracks(runID string, plan *Plan) ([]Track, err
 func (r *DefaultReplay) compareFiles(oldPath, newPath string) []string {
 	oldLines := r.readRows(oldPath)
 	newLines := r.readRows(newPath)
-	
+
 	var mismatches []string
 	if len(oldLines) != len(newLines) {
 		mismatches = append(mismatches, fmt.Sprintf("row count mismatch: old=%d, new=%d", len(oldLines), len(newLines)))
@@ -148,7 +159,7 @@ func (r *DefaultReplay) compareFiles(oldPath, newPath string) []string {
 		// Compare ignoring evidence_ids
 		delete(oldLines[i], "evidence_ids")
 		delete(newLines[i], "evidence_ids")
-		
+
 		if !reflect.DeepEqual(oldLines[i], newLines[i]) {
 			mismatches = append(mismatches, fmt.Sprintf("row %d data mismatch", i))
 		}

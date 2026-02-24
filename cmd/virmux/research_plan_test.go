@@ -13,9 +13,8 @@ import (
 )
 
 func TestResearchPlanWritesPlanYAML(t *testing.T) {
-	t.Parallel()
 	repo := newScriptTestRepo(t)
-	
+
 	// Create required directories and files
 	sha := "test-sha"
 	mustWriteScriptFixtureFile(t, filepath.Join(repo, "vm", "images.lock"), sha)
@@ -50,7 +49,7 @@ func TestResearchPlanWritesPlanYAML(t *testing.T) {
 
 	w.Close()
 	os.Stdout = oldStdout
-	
+
 	outBytes, _ := ioutil.ReadAll(r)
 	out := string(outBytes)
 	lines := strings.Split(out, "\n")

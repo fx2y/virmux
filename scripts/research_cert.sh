@@ -36,8 +36,11 @@ go run ./cmd/virmux research replay --run "$RUN_ID" --only track-1 --label "$LAB
 REPLAY_RUN_ID=$(cat replay_output.json | jq -r .run_id)
 
 echo "5. Checking replay timeline for mismatch..."
-# Since track-1 is non-deterministic (timestamp added in C5), it SHOULD mismatch.
-go run ./cmd/virmux research timeline --run "$REPLAY_RUN_ID" | grep "research.replay.mismatch" > /dev/null || { echo "FAIL: replay mismatch not detected for non-deterministic track"; exit 1; }
+# Default deterministic tracks must not emit replay mismatches.
+if go run ./cmd/virmux research timeline --run "$REPLAY_RUN_ID" | grep "research.replay.mismatch" > /dev/null; then
+    echo "FAIL: deterministic replay emitted mismatch"
+    exit 1
+fi
 
 echo "6. Checking contradiction in report..."
 go run ./cmd/virmux research reduce --run "$RUN_ID" --label "$LABEL"
@@ -61,11 +64,15 @@ bash scripts/research_docs_drift.sh
 echo "10. Running portability test..."
 bash scripts/research_portability.sh
 
-echo "11. Generating DoD matrix..."
+echo "11. Running parallel scheduler guards..."
+go test ./internal/skill/research -run 'TestSchedulerTopo|TestSchedulerFailure|TestSchedulerReturnsWorkerInfraError|TestSchedulerOnlyMissingDependencyDoesNotDeadlock' > /dev/null
+mkdir -p tmp
+date > tmp/research-parallel.ok
+
+echo "12. Generating DoD matrix..."
 bash scripts/spec06_dod_matrix.sh
 
 echo "--- Research Certification PASSED ---"
 rm -f run_output.json replay_output.json replay_nondet_output.json
-mkdir -p tmp
 date > tmp/research-cert.ok
 echo "{\"status\": \"ok\", \"ts\": \"$(date -u +%FT%TZ)\"}" > tmp/ship-research-summary.json

@@ -6,6 +6,7 @@ import (
 	"sort"
 	"sync"
 	"testing"
+	"time"
 )
 
 type mockMapper struct {
@@ -107,6 +108,75 @@ func TestSchedulerFailure(t *testing.T) {
 	}
 	if !foundBlockedC {
 		t.Errorf("expected track C to be blocked")
+	}
+}
+
+func TestSchedulerReturnsWorkerInfraError(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	s := &DefaultScheduler{
+		MaxConcurrency: 1,
+		Mapper:         &mockMapper{},
+	}
+	plan := &Plan{
+		PlanID: "p",
+		Tracks: []Track{{ID: "A", Q: "q", Kind: "deep"}},
+	}
+
+	_, err := s.Run(ctx, plan, "test-run", nil)
+	if err == nil {
+		t.Fatalf("expected context error from worker infra path")
+	}
+}
+
+func TestSchedulerOnlyMissingDependencyDoesNotDeadlock(t *testing.T) {
+	t.Parallel()
+	s := &DefaultScheduler{
+		MaxConcurrency: 1,
+		Mapper:         &mockMapper{},
+		TrackArtifactExists: func(runID, trackID string) (bool, error) {
+			return false, nil
+		},
+	}
+	plan := &Plan{
+		PlanID: "p",
+		Tracks: []Track{
+			{ID: "A", Q: "a", Kind: "deep"},
+			{ID: "B", Q: "b", Kind: "deep", Deps: []string{"A"}},
+		},
+	}
+
+	done := make(chan struct{})
+	var states []TrackState
+	var err error
+	go func() {
+		states, err = s.Run(context.Background(), plan, "test-run", []string{"B"})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("scheduler deadlocked on subset with missing deps")
+	}
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(states) != 2 {
+		t.Fatalf("expected 2 states, got %d", len(states))
+	}
+	got := map[string]TrackStatus{}
+	for _, st := range states {
+		got[st.TrackID] = st.Status
+	}
+	if got["A"] != TrackBlocked {
+		t.Fatalf("expected A blocked, got %v", got["A"])
+	}
+	if got["B"] != TrackBlocked {
+		t.Fatalf("expected B blocked, got %v", got["B"])
 	}
 }
 

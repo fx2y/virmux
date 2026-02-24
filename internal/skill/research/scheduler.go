@@ -3,8 +3,6 @@ package research
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 
 	"golang.org/x/sync/errgroup"
@@ -12,9 +10,10 @@ import (
 )
 
 type DefaultScheduler struct {
-	MaxConcurrency int64
-	Mapper         Mapper
-	Emitter        func(event string, payload map[string]any) error
+	MaxConcurrency      int64
+	Mapper              Mapper
+	Emitter             func(event string, payload map[string]any) error
+	TrackArtifactExists func(runID, trackID string) (bool, error)
 }
 
 func (s *DefaultScheduler) isRetryable(err error, res MapOutput) bool {
@@ -34,6 +33,13 @@ func (s *DefaultScheduler) emit(event string, payload map[string]any) {
 	}
 }
 
+func (s *DefaultScheduler) hasTrackArtifact(runID, trackID string) (bool, error) {
+	if s.TrackArtifactExists == nil {
+		return false, nil
+	}
+	return s.TrackArtifactExists(runID, trackID)
+}
+
 func (s *DefaultScheduler) Build(ctx context.Context, input ScheduleInput) (ScheduleOutput, error) {
 	// For now, this just returns the PlanID.
 	// In a more complex implementation, it might pre-calculate the batches.
@@ -46,7 +52,7 @@ func (s *DefaultScheduler) Run(ctx context.Context, plan *Plan, runID string, on
 		s.MaxConcurrency = 4
 	}
 	sem := semaphore.NewWeighted(s.MaxConcurrency)
-	
+
 	return s.runConcurrent(ctx, plan, runID, sem, only)
 }
 
@@ -68,26 +74,35 @@ func (s *DefaultScheduler) runConcurrent(ctx context.Context, plan *Plan, runID 
 		}
 	}
 
+	if len(onlyMap) > 0 {
+		for id := range onlyMap {
+			if _, ok := states[id]; !ok {
+				return nil, Failure{Code: FailureRerunSelector, Message: fmt.Sprintf("track %q not in plan", id)}
+			}
+		}
+	}
+
+	completedCount := 0
+
 	// If we are only running a subset, mark everything else as "Done" if it was already successful
 	if len(onlyMap) > 0 {
 		for _, t := range plan.Tracks {
 			if !onlyMap[t.ID] {
-				// Check if artifact exists
-				mapDir := filepath.Join(s.Mapper.(*DefaultMapper).RunsDir, runID, "map")
-				trackPath := filepath.Join(mapDir, fmt.Sprintf("%s.jsonl", t.ID))
-				if _, err := os.Stat(trackPath); err == nil {
+				ok, err := s.hasTrackArtifact(runID, t.ID)
+				if err != nil {
+					return nil, err
+				}
+				if ok {
 					states[t.ID].Status = TrackDone
 					// Update inDegree for dependents
 					for _, dependent := range adj[t.ID] {
 						inDegree[dependent]--
 					}
 				} else {
-					// It's not in our 'only' list AND it's not already done.
-					// This might be an error or we should just treat it as blocked?
-					// For replay, usually we only replay what we want.
 					states[t.ID].Status = TrackBlocked
 					states[t.ID].Error = "not in rerun set and no artifact found"
 				}
+				completedCount++
 			}
 		}
 	}
@@ -96,15 +111,8 @@ func (s *DefaultScheduler) runConcurrent(ctx context.Context, plan *Plan, runID 
 	cond := sync.NewCond(&mu)
 	g, ctx := errgroup.WithContext(ctx)
 
-	completedCount := 0
 	totalTracks := len(plan.Tracks)
-
-	// Count already Done/Blocked tracks
-	for _, state := range states {
-		if state.Status == TrackDone || state.Status == TrackBlocked {
-			completedCount++
-		}
-	}
+	runningCount := 0
 
 	for {
 		mu.Lock()
@@ -114,17 +122,34 @@ func (s *DefaultScheduler) runConcurrent(ctx context.Context, plan *Plan, runID 
 		}
 
 		var ready []string
-		for id, state := range states {
+		for _, t := range plan.Tracks {
+			id := t.ID
+			state := states[id]
 			if state.Status == TrackPending && inDegree[id] == 0 {
 				ready = append(ready, id)
 				state.Status = TrackRunning
 			}
 		}
+		runningCount += len(ready)
 		mu.Unlock()
 
 		if len(ready) == 0 {
 			mu.Lock()
 			if completedCount < totalTracks {
+				if runningCount == 0 {
+					for _, t := range plan.Tracks {
+						st := states[t.ID]
+						if st.Status != TrackPending {
+							continue
+						}
+						st.Status = TrackBlocked
+						st.Error = fmt.Sprintf("unsatisfied dependencies: %v", t.Deps)
+						completedCount++
+						s.emit("research.map.track.blocked", map[string]any{"track_id": t.ID, "reason": "unsatisfied_dependencies"})
+					}
+					mu.Unlock()
+					continue
+				}
 				cond.Wait()
 				mu.Unlock()
 				continue
@@ -137,6 +162,15 @@ func (s *DefaultScheduler) runConcurrent(ctx context.Context, plan *Plan, runID 
 			trackID := id
 			g.Go(func() error {
 				if err := sem.Acquire(ctx, 1); err != nil {
+					mu.Lock()
+					defer mu.Unlock()
+					if states[trackID].Status == TrackRunning {
+						states[trackID].Status = TrackFailed
+						states[trackID].Error = err.Error()
+						completedCount++
+					}
+					runningCount--
+					cond.Broadcast()
 					return err
 				}
 				defer sem.Release(1)
@@ -144,26 +178,26 @@ func (s *DefaultScheduler) runConcurrent(ctx context.Context, plan *Plan, runID 
 				// Initial attempt
 				s.emit("research.map.track.started", map[string]any{"track_id": trackID, "run_id": runID})
 				res, err := s.Mapper.Run(ctx, MapInput{RunID: runID, TrackID: trackID})
-				
+
 				// Basic retry once for timeout or no results (stubbed condition)
 				if (err != nil || res.Retryable) && s.isRetryable(err, res) {
 					s.emit("research.map.track.retry", map[string]any{
-						"track_id": trackID, 
-						"run_id": runID, 
-						"error": fmt.Sprintf("%v", err),
+						"track_id":  trackID,
+						"run_id":    runID,
+						"error":     fmt.Sprintf("%v", err),
 						"retryable": res.Retryable,
 					})
 					res, err = s.Mapper.Run(ctx, MapInput{RunID: runID, TrackID: trackID})
 				}
-				
+
 				mu.Lock()
 				defer mu.Unlock()
-				
+
 				if err != nil {
 					states[trackID].Status = TrackFailed
 					states[trackID].Error = err.Error()
 					s.emit("research.map.track.failed", map[string]any{"track_id": trackID, "error": err.Error()})
-					
+
 					// Cascade failure to dependents
 					var cascade func(string)
 					cascade = func(id string) {
@@ -186,6 +220,7 @@ func (s *DefaultScheduler) runConcurrent(ctx context.Context, plan *Plan, runID 
 					}
 				}
 
+				runningCount--
 				completedCount++
 				cond.Broadcast()
 				return nil
@@ -193,8 +228,10 @@ func (s *DefaultScheduler) runConcurrent(ctx context.Context, plan *Plan, runID 
 		}
 	}
 
-	_ = g.Wait()
-	
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
 	result := make([]TrackState, 0, len(states))
 	for _, id := range plan.Tracks {
 		result = append(result, *states[id.ID])

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -35,8 +36,8 @@ func TestMapperRun(t *testing.T) {
 	st.StartRun(context.Background(), store.Run{ID: runID, Task: "test", StartedAt: time.Now()})
 
 	plan := &Plan{
-		PlanID: "test-plan",
-		Goal: "test goal",
+		PlanID:       "test-plan",
+		Goal:         "test goal",
 		DimsDidntAsk: []string{"none"},
 		Tracks: []Track{
 			{ID: "T1", Q: "Query 1", Kind: "deep"},
@@ -87,14 +88,14 @@ func TestMapperWide(t *testing.T) {
 	st.StartRun(context.Background(), store.Run{ID: runID, Task: "test", StartedAt: time.Now()})
 
 	plan := &Plan{
-		PlanID: "wide-plan",
-		Goal: "wide goal",
+		PlanID:       "wide-plan",
+		Goal:         "wide goal",
 		DimsDidntAsk: []string{"none"},
 		Tracks: []Track{
 			{
 				ID: "W1", Q: "Wide Query", Kind: "wide",
-				Targets: []string{"T1", "T2"},
-				Attrs: []string{"A1", "A2"},
+				Targets:  []string{"T1", "T2"},
+				Attrs:    []string{"A1", "A2"},
 				StopRule: "coverage>=0.5",
 			},
 		},
@@ -126,7 +127,7 @@ func TestMapperWide(t *testing.T) {
 	// Next loop: Ratio=0.25. Process C2. Completed=2.
 	// Next loop: Ratio=0.5. 0.5 >= 0.5. BREAK.
 	// So 2 rows expected. Correct.
-	
+
 	if lines != 2 {
 		t.Errorf("expected 2 rows due to coverage>=0.5, got %d", lines)
 	}
@@ -139,6 +140,23 @@ func TestMapperWide(t *testing.T) {
 	data2, _ := os.ReadFile(filepath.Join(runDir, "map", "W1.jsonl"))
 	if !strings.Contains(string(data2), "\"cache\":\"hit\"") {
 		t.Errorf("expected cached result in rows")
+	}
+}
+
+func TestDeepTrackDeterministicRows(t *testing.T) {
+	t.Parallel()
+	m := &DefaultMapper{}
+	track := &Track{ID: "T1", Q: "same query", Kind: "deep"}
+	out1, err := m.runDeepTrack(context.Background(), track)
+	if err != nil {
+		t.Fatalf("run1: %v", err)
+	}
+	out2, err := m.runDeepTrack(context.Background(), track)
+	if err != nil {
+		t.Fatalf("run2: %v", err)
+	}
+	if !reflect.DeepEqual(out1.Rows, out2.Rows) {
+		t.Fatalf("deep track rows must be deterministic\nout1=%#v\nout2=%#v", out1.Rows, out2.Rows)
 	}
 }
 
