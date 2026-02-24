@@ -132,28 +132,11 @@ if [[ -z "$pass_eval_id" || -z "$fail_eval_id" ]]; then
   exit 1
 fi
 
-# Some legacy DBs still enforce NOT NULL promotions.eval_run_id on rollback inserts.
-sqlite3 "$db" "
-INSERT INTO promotions(
-  id,skill,tag,base_ref,head_ref,from_ref,to_ref,reason,metrics_json,commit_sha,op,eval_run_id,verdict_sha256,actor,created_at
-) VALUES (
-  'c7-rollback-${fail_eval_id}',
-  'dd',
-  'skill/dd/prod',
-  '${head_ref}',
-  '${baseline_ref}',
-  '${head_ref}',
-  '${baseline_ref}',
-  'c7 canary fail fallback rollback',
-  '{}',
-  '',
-  'rollback',
-  '${fail_eval_id}',
-  'sha256:rollback',
-  'ship:skills',
-  '$(date -u +%Y-%m-%dT%H:%M:%SZ)'
-);
-" || true
+eval_run_notnull="$(sqlite3 "$db" "SELECT COALESCE((SELECT \"notnull\" FROM pragma_table_info('promotions') WHERE name='eval_run_id'),1);")"
+if [[ "$eval_run_notnull" != "0" ]]; then
+  echo "skill:canary-cert: legacy schema detected (promotions.eval_run_id must be nullable for rollback compatibility)" >&2
+  exit 1
+fi
 
 jq -n \
   --arg cohort_prefix "$cohort_prefix" \

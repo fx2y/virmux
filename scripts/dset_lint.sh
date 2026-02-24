@@ -30,7 +30,7 @@ fi
 schema='type=="object" and (keys|sort)==["context_refs","expected_properties","id","input","tags"] and (.id|type=="string" and length>0) and (.input|type=="object") and (.context_refs|type=="array") and (.expected_properties|type=="object") and (.tags|type=="array")'
 
 for f in "${files[@]}"; do
-  jq -e -c "$schema" "$f" >/dev/null || {
+  jq -s -e "all(.[]; $schema)" "$f" >/dev/null || {
     echo "dset:lint: schema check failed for $f" >&2
     exit 1
   }

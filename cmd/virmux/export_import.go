@@ -168,10 +168,6 @@ func exportEvalBundle(ctx context.Context, dbPath, evalID, outPath string) error
 	}
 	defer st.Close()
 	db := st.DB()
-	skill, err := queryEvalSkill(db, evalID)
-	if err != nil {
-		return err
-	}
 
 	tmpDir, err := os.MkdirTemp("", "virmux-export-eval-*")
 	if err != nil {
@@ -182,7 +178,7 @@ func exportEvalBundle(ctx context.Context, dbPath, evalID, outPath string) error
 	if err := os.MkdirAll(filepath.Join(stage, "db"), 0o755); err != nil {
 		return err
 	}
-	if err := writeEvalSnapshots(db, evalID, skill, filepath.Join(stage, "db")); err != nil {
+	if err := writeEvalSnapshots(db, evalID, filepath.Join(stage, "db")); err != nil {
 		return err
 	}
 	meta := exportBundleMeta{Version: 1, Mode: "eval", EvalID: evalID, Task: "skill:ab"}
@@ -269,17 +265,6 @@ func queryRunTask(db *sql.DB, runID string) (string, error) {
 	return task, nil
 }
 
-func queryEvalSkill(db *sql.DB, evalID string) (string, error) {
-	var skill string
-	if err := db.QueryRow(`SELECT skill FROM eval_runs WHERE id=?`, evalID).Scan(&skill); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", fmt.Errorf("eval not found: %s", evalID)
-		}
-		return "", err
-	}
-	return skill, nil
-}
-
 func writeRunSnapshots(db *sql.DB, runID, outDir string) error {
 	if err := snapshotRows(db, filepath.Join(outDir, "runs.json"),
 		`SELECT id,task,label,agent_id,image_sha,kernel_sha,rootfs_sha,snapshot_id,cost_est,status,started_at,ended_at,boot_ms,resume_ms,trace_path,source_bundle FROM runs WHERE id=? ORDER BY id`,
@@ -319,7 +304,7 @@ func writeRunSnapshots(db *sql.DB, runID, outDir string) error {
 	return nil
 }
 
-func writeEvalSnapshots(db *sql.DB, evalID, skill, outDir string) error {
+func writeEvalSnapshots(db *sql.DB, evalID, outDir string) error {
 	if err := snapshotRows(db, filepath.Join(outDir, "eval_runs.json"),
 		`SELECT id,skill,cohort,base_ref,head_ref,provider,fixtures_hash,cfg_sha256,cfg_path,results_sha256,results_path,verdict_sha256,verdict_path,score_p50_base,score_p50_head,fail_rate_base,fail_rate_head,cost_total_base,cost_total_head,score_p50_delta,fail_rate_delta,cost_delta,pass,verdict_json,created_at FROM eval_runs WHERE id=? ORDER BY id`,
 		evalID); err != nil {
@@ -336,12 +321,15 @@ func writeEvalSnapshots(db *sql.DB, evalID, skill, outDir string) error {
 		return err
 	}
 	if err := snapshotRows(db, filepath.Join(outDir, "experiments.json"),
-		`SELECT id,skill,base_ref,head_ref,created_at FROM experiments WHERE id=? ORDER BY id`,
+		`SELECT id,eval_run_id,skill,cohort,base_ref,head_ref,judge_mode,created_at FROM experiments WHERE eval_run_id=? ORDER BY id`,
 		evalID); err != nil {
 		return err
 	}
 	if err := snapshotRows(db, filepath.Join(outDir, "comparisons.json"),
-		`SELECT experiment_id,fixture_id,winner,rationale,created_at FROM comparisons WHERE experiment_id=? ORDER BY id`,
+		`SELECT c.experiment_id,c.fixture_id,c.winner,c.rationale,c.created_at
+		 FROM comparisons c
+		 WHERE c.experiment_id IN (SELECT e.id FROM experiments e WHERE e.eval_run_id=?)
+		 ORDER BY c.experiment_id,c.id`,
 		evalID); err != nil {
 		return err
 	}
@@ -351,8 +339,8 @@ func writeEvalSnapshots(db *sql.DB, evalID, skill, outDir string) error {
 		return err
 	}
 	if err := snapshotRows(db, filepath.Join(outDir, "suggest_runs.json"),
-		`SELECT id,skill,motif_key,branch,commit_sha,pr_body_hash,pr_body_path,run_ids_json,created_at FROM suggest_runs WHERE skill=? ORDER BY created_at,id`,
-		skill); err != nil {
+		`SELECT id,skill,eval_run_id,motif_key,branch,commit_sha,pr_body_hash,pr_body_path,run_ids_json,created_at FROM suggest_runs WHERE eval_run_id=? ORDER BY created_at,id`,
+		evalID); err != nil {
 		return err
 	}
 	return nil
@@ -828,8 +816,12 @@ func importEvalSnapshotsIntoStore(db *sql.DB, stage string) error {
 		}
 	}
 	for _, row := range expRows {
-		if _, err := tx.Exec(`INSERT INTO experiments(id,skill,base_ref,head_ref,created_at) VALUES(?,?,?,?,?)`,
-			str(row["id"]), str(row["skill"]), str(row["base_ref"]), str(row["head_ref"]), str(row["created_at"])); err != nil {
+		var evalRunID sql.NullString
+		if v := str(row["eval_run_id"]); v != "" {
+			evalRunID = sql.NullString{String: v, Valid: true}
+		}
+		if _, err := tx.Exec(`INSERT INTO experiments(id,eval_run_id,skill,cohort,base_ref,head_ref,judge_mode,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+			str(row["id"]), evalRunID, str(row["skill"]), str(row["cohort"]), str(row["base_ref"]), str(row["head_ref"]), str(row["judge_mode"]), str(row["created_at"])); err != nil {
 			return fmt.Errorf("insert imported experiment: %w", err)
 		}
 	}
@@ -852,8 +844,12 @@ func importEvalSnapshotsIntoStore(db *sql.DB, stage string) error {
 		}
 	}
 	for _, row := range suggestRows {
-		if _, err := tx.Exec(`INSERT INTO suggest_runs(id,skill,motif_key,branch,commit_sha,pr_body_hash,pr_body_path,run_ids_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
-			str(row["id"]), str(row["skill"]), str(row["motif_key"]), str(row["branch"]), str(row["commit_sha"]), str(row["pr_body_hash"]),
+		var evalRunID sql.NullString
+		if v := str(row["eval_run_id"]); v != "" {
+			evalRunID = sql.NullString{String: v, Valid: true}
+		}
+		if _, err := tx.Exec(`INSERT INTO suggest_runs(id,skill,eval_run_id,motif_key,branch,commit_sha,pr_body_hash,pr_body_path,run_ids_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			str(row["id"]), str(row["skill"]), evalRunID, str(row["motif_key"]), str(row["branch"]), str(row["commit_sha"]), str(row["pr_body_hash"]),
 			str(row["pr_body_path"]), str(row["run_ids_json"]), str(row["created_at"])); err != nil {
 			return fmt.Errorf("insert imported suggest_run: %w", err)
 		}

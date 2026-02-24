@@ -246,6 +246,11 @@ func cmdSkillJudgeWithEmitter(args []string, emitEvent skillEventEmitter) error 
 	if len(fs.Args()) != 1 {
 		return errors.New("usage: virmux skill judge <run-id>")
 	}
+	switch strings.TrimSpace(*mode) {
+	case "rules", "llm_abs", "llm_probe":
+	default:
+		return fmt.Errorf("invalid --mode %q (allowed: rules|llm_abs|llm_probe)", *mode)
+	}
 	runID := strings.TrimSpace(fs.Args()[0])
 	if runID == "" {
 		return errors.New("run id cannot be empty")
@@ -825,9 +830,9 @@ func runABReport(ctx context.Context, st *store.Store, id, fmtStr string) error 
 			return nil
 		}
 		out := map[string]any{
-			"id":     ev.ID,
-			"skill":  ev.Skill,
-			"pass":   ev.Pass,
+			"id":    ev.ID,
+			"skill": ev.Skill,
+			"pass":  ev.Pass,
 			"deltas": map[string]any{
 				"score_p50_delta": ev.ScoreP50Delta,
 				"fail_rate_delta": ev.FailRateDelta,
@@ -930,11 +935,19 @@ func cmdSkillJudgeSanity(args []string) error {
 	dbPath := fs.String("db", "runs/virmux.sqlite", "sqlite db path")
 	runsDir := fs.String("runs-dir", "runs", "runs directory")
 	skillsDir := fs.String("skills-dir", "skills", "skills root directory")
+	minAgreement := fs.Float64("min-agreement", 0.8, "minimum required pass/fail agreement")
+	minSamples := fs.Int("min-samples", 20, "minimum required evaluated samples")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *sanityDset == "" {
 		return errors.New("--sanity-dset is required")
+	}
+	if *minAgreement < 0 || *minAgreement > 1 {
+		return errors.New("--min-agreement must be in [0,1]")
+	}
+	if *minSamples <= 0 {
+		return errors.New("--min-samples must be > 0")
 	}
 
 	st, err := store.Open(*dbPath)
@@ -968,14 +981,16 @@ func cmdSkillJudgeSanity(args []string) error {
 		}
 		items = append(items, item)
 	}
+	if err := sc.Err(); err != nil {
+		return err
+	}
 
 	var (
-		agreed int
-		total  int
+		agreed    int
+		evaluated int
 	)
 
 	for _, item := range items {
-		total++
 		runDir := filepath.Join(*runsDir, item.RunID)
 		meta, err := judgeflow.ReadRunMeta(runDir)
 		if err != nil {
@@ -993,19 +1008,14 @@ func cmdSkillJudgeSanity(args []string) error {
 			fmt.Fprintf(os.Stderr, "warn: skip sanity %s: db error: %v\n", item.ID, err)
 			continue
 		}
-		tw, err := trace.NewWriter("/dev/null")
-		if err != nil {
-			tw = nil
-		}
-
 		svc := judgeflow.Service{
-			Emit: func(ctx context.Context, event string, payload map[string]any) error { return nil },
+			Emit:             func(ctx context.Context, event string, payload map[string]any) error { return nil },
 			PersistArtifacts: func(ctx context.Context, runID string, paths []string) error { return nil },
-			InsertScore:    func(ctx context.Context, row store.Score) error { return nil },
-			InsertJudgeRun: func(ctx context.Context, row store.JudgeRun) error { return nil },
-			Now:            time.Now,
-			DBPath:         *dbPath,
-			RunsDir:        *runsDir,
+			InsertScore:      func(ctx context.Context, row store.Score) error { return nil },
+			InsertJudgeRun:   func(ctx context.Context, row store.JudgeRun) error { return nil },
+			Now:              time.Now,
+			DBPath:           *dbPath,
+			RunsDir:          *runsDir,
 		}
 
 		res, err := svc.Run(context.Background(), judgeflow.Input{
@@ -1020,14 +1030,13 @@ func cmdSkillJudgeSanity(args []string) error {
 			ToolCalls:  meta.ToolCalls,
 			ExpectFile: meta.ExpectFiles,
 			Mode:       "rules",
+			ReadOnly:   true,
 		})
-		if tw != nil {
-			tw.Close()
-		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warn: skip sanity %s: eval error: %v\n", item.ID, err)
 			continue
 		}
+		evaluated++
 
 		if res.Judge.Pass == item.Expected.Pass {
 			agreed++
@@ -1035,17 +1044,24 @@ func cmdSkillJudgeSanity(args []string) error {
 	}
 
 	agreement := 0.0
-	if total > 0 {
-		agreement = float64(agreed) / float64(total)
+	if evaluated > 0 {
+		agreement = float64(agreed) / float64(evaluated)
 	}
 
 	out := map[string]any{
-		"total":     total,
+		"total":     evaluated,
+		"input":     len(items),
 		"agreed":    agreed,
 		"agreement": agreement,
 	}
 	b, _ := json.Marshal(out)
 	fmt.Println(string(b))
+	if evaluated < *minSamples {
+		return fmt.Errorf("judge sanity failed: samples=%d below min=%d", evaluated, *minSamples)
+	}
+	if agreement < *minAgreement {
+		return fmt.Errorf("judge sanity failed: agreement=%.4f below min=%.4f", agreement, *minAgreement)
+	}
 
 	return nil
 }

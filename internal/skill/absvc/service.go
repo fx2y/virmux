@@ -66,8 +66,8 @@ type Result struct {
 	BaseFail    float64
 	HeadFail    float64
 
-	ExperimentID string `json:"experiment_id,omitempty"`
-	Winner       string `json:"winner,omitempty"` // "A", "B", "tie"
+	ExperimentID string  `json:"experiment_id,omitempty"`
+	Winner       string  `json:"winner,omitempty"` // "A", "B", "tie"
 	WinRate      float64 `json:"win_rate,omitempty"`
 }
 
@@ -86,6 +86,13 @@ func (s Service) Run(ctx context.Context, in Input) (Result, error) {
 	}
 	if in.TimeoutSec <= 0 {
 		in.TimeoutSec = 120
+	}
+	switch strings.TrimSpace(in.JudgeMode) {
+	case "", "independent":
+		in.JudgeMode = "independent"
+	case "pairwise":
+	default:
+		return Result{}, fmt.Errorf("invalid --judge mode %q (allowed: independent|pairwise)", in.JudgeMode)
 	}
 	now := time.Now
 	if s.Now != nil {
@@ -286,9 +293,12 @@ func (s Service) Run(ctx context.Context, in Input) (Result, error) {
 		expID := fmt.Sprintf("%d-exp", now().UTC().UnixNano())
 		if err := s.Store.InsertExperiment(ctx, store.Experiment{
 			ID:        expID,
+			EvalRunID: evalID,
 			Skill:     in.SkillName,
+			Cohort:    cohort,
 			BaseRef:   in.BaseRef,
 			HeadRef:   in.HeadRef,
+			JudgeMode: in.JudgeMode,
 			CreatedAt: now().UTC(),
 		}); err != nil {
 			return Result{}, err
@@ -316,16 +326,12 @@ func (s Service) Run(ctx context.Context, in Input) (Result, error) {
 					winner = "A"
 					rationale = "base passed, head failed"
 				} else if hc.Pass && bc.Pass {
-					// Both pass, equal score. If AntiTie is true, we might still tie or pick one.
-					// Spec says "tie only when both hard-fail".
-					// So if both pass, we should probably pick one or it's a tie if we can't decide.
-					// For now, if both pass and scores same, it's a tie but maybe shouldn't be?
 					if in.AntiTie {
-						winner = "B" // Favor head in anti-tie if both pass?
+						winner = "B"
 						rationale = "anti-tie favor head"
 					} else {
-						winner = "tie"
-						rationale = "both pass with equal score"
+						winner = "A"
+						rationale = "tie-break favor base"
 					}
 				}
 			}

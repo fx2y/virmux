@@ -81,7 +81,7 @@ func (s Service) Run(ctx context.Context, in Input) (Result, error) {
 
 	op := "promote"
 	var evalRun store.EvalRun
-	var fromRef, toRef, commitSHA string
+	var fromRef, toRef, commitSHA, baseRef, headRef string
 	var metricsJSON string
 	var verdictSHA string
 
@@ -93,23 +93,26 @@ func (s Service) Run(ctx context.Context, in Input) (Result, error) {
 		toRef = in.ToRef
 
 		// Get current ref for fromRef
-		res, _ := ex.Run(ctx, skillpkg.Command{
-			Dir:  in.RepoDir,
-			Name: "git",
-			Args: []string{"rev-parse", promoTag},
-		})
+		res, err := resolveRef(ctx, ex, in.RepoDir, promoTag)
+		if err != nil {
+			return Result{}, fmt.Errorf("resolve current promo tag %s: %w", promoTag, err)
+		}
 		fromRef = strings.TrimSpace(string(res.Stdout))
+		if fromRef == "" {
+			return Result{}, fmt.Errorf("resolve current promo tag %s: empty ref", promoTag)
+		}
+		baseRef = fromRef
+		headRef = toRef
 
 		// Resolve toRef to commit SHA
-		res, err := ex.Run(ctx, skillpkg.Command{
-			Dir:  in.RepoDir,
-			Name: "git",
-			Args: []string{"rev-parse", toRef},
-		})
+		res, err = resolveRef(ctx, ex, in.RepoDir, toRef)
 		if err != nil {
 			return Result{}, fmt.Errorf("resolve rollback target %s: %w", toRef, err)
 		}
 		commitSHA = strings.TrimSpace(string(res.Stdout))
+		if commitSHA == "" {
+			return Result{}, fmt.Errorf("resolve rollback target %s: empty commit", toRef)
+		}
 	} else {
 		if strings.TrimSpace(in.EvalRunID) == "" {
 			return Result{}, errors.New("promote requires --eval-run-id")
@@ -123,7 +126,6 @@ func (s Service) Run(ctx context.Context, in Input) (Result, error) {
 			return Result{}, fmt.Errorf("MISSING_AB_VERDICT: eval run skill=%s does not match %s", evalRun.Skill, in.SkillName)
 		}
 
-		// Use gate library
 		verdict := gates.GateEval(evalRun)
 		if !verdict.Pass {
 			return Result{}, fmt.Errorf("%s: %s", verdict.Refusal, verdict.Reason)
@@ -136,7 +138,16 @@ func (s Service) Run(ctx context.Context, in Input) (Result, error) {
 
 		fromRef = evalRun.BaseRef
 		toRef = evalRun.HeadRef
-		commitSHA = evalRun.HeadRef
+		baseRef = evalRun.BaseRef
+		headRef = evalRun.HeadRef
+		res, err := resolveRef(ctx, ex, in.RepoDir, toRef)
+		if err != nil {
+			return Result{}, fmt.Errorf("resolve promote target %s: %w", toRef, err)
+		}
+		commitSHA = strings.TrimSpace(string(res.Stdout))
+		if commitSHA == "" {
+			return Result{}, fmt.Errorf("resolve promote target %s: empty commit", toRef)
+		}
 		metricsJSON = evalRun.VerdictJSON
 		verdictSHA = evalRun.VerdictSHA256
 	}
@@ -162,8 +173,8 @@ func (s Service) Run(ctx context.Context, in Input) (Result, error) {
 			ID:            promoID,
 			Skill:         in.SkillName,
 			Tag:           promoTag,
-			BaseRef:       evalRun.BaseRef,
-			HeadRef:       evalRun.HeadRef,
+			BaseRef:       baseRef,
+			HeadRef:       headRef,
 			FromRef:       fromRef,
 			ToRef:         toRef,
 			Reason:        in.Reason,
@@ -184,11 +195,31 @@ func (s Service) Run(ctx context.Context, in Input) (Result, error) {
 		Skill:     in.SkillName,
 		Tag:       promoTag,
 		EvalRunID: evalRun.ID,
-		BaseRef:   evalRun.BaseRef,
-		HeadRef:   evalRun.HeadRef,
+		BaseRef:   baseRef,
+		HeadRef:   headRef,
 		FromRef:   fromRef,
 		ToRef:     toRef,
 		Actor:     actor,
 		Op:        op,
 	}, nil
+}
+
+func resolveRef(ctx context.Context, ex eval.Exec, repoDir, ref string) (skillpkg.CommandResult, error) {
+	cands := []string{ref}
+	if !strings.HasPrefix(ref, "refs/") {
+		cands = append(cands, "refs/tags/"+ref)
+	}
+	var lastErr error
+	for _, cand := range cands {
+		res, err := ex.Run(ctx, skillpkg.Command{
+			Dir:  repoDir,
+			Name: "git",
+			Args: []string{"rev-parse", cand},
+		})
+		if err == nil {
+			return res, nil
+		}
+		lastErr = err
+	}
+	return skillpkg.CommandResult{}, lastErr
 }

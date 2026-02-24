@@ -176,6 +176,7 @@ func TestCmdSkillPromoteWritesTagAndPromotionRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	headRef := strings.TrimSpace(string(out))
+	run("tag", "dd-prod", headRef)
 
 	dbPath := filepath.Join(tmp, "runs", "virmux.sqlite")
 	st, err := store.Open(dbPath)
@@ -253,6 +254,7 @@ func TestCmdSkillPromoteRollbackWritesAuditRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	headRef := strings.TrimSpace(string(out))
+	run("tag", "dd-prod", headRef)
 
 	dbPath := filepath.Join(tmp, "runs", "virmux.sqlite")
 	st, err := store.Open(dbPath)
@@ -263,6 +265,7 @@ func TestCmdSkillPromoteRollbackWritesAuditRow(t *testing.T) {
 	if err := cmdSkillPromote([]string{
 		"--db", dbPath,
 		"--repo-dir", repo,
+		"--tag", "dd-prod",
 		"--rollback",
 		"--to-ref", headRef,
 		"--reason", "c7 smoke rollback",

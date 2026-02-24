@@ -192,6 +192,7 @@ func TestStoreSchemaAndFK(t *testing.T) {
 	if err := s.InsertSuggestRun(ctx, SuggestRun{
 		ID:         "sug-1",
 		Skill:      "suggest-dd-a1b2",
+		EvalRunID:  "ab-1",
 		MotifKey:   "motif",
 		Branch:     "suggest/dd-a1b2",
 		CommitSHA:  "def456",
@@ -274,6 +275,18 @@ func TestStoreSchemaAndFK(t *testing.T) {
 	}
 	if idxCount != 1 {
 		t.Fatalf("expected idx_suggest_runs_skill_created, got %d", idxCount)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_suggest_runs_eval_run'`).Scan(&idxCount); err != nil {
+		t.Fatalf("query suggest_runs eval index: %v", err)
+	}
+	if idxCount != 1 {
+		t.Fatalf("expected idx_suggest_runs_eval_run, got %d", idxCount)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_experiments_eval_run'`).Scan(&idxCount); err != nil {
+		t.Fatalf("query experiments eval index: %v", err)
+	}
+	if idxCount != 1 {
+		t.Fatalf("expected idx_experiments_eval_run, got %d", idxCount)
 	}
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_canary_runs_skill_created'`).Scan(&idxCount); err != nil {
 		t.Fatalf("query canary_runs skill index: %v", err)

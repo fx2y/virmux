@@ -118,9 +118,12 @@ type EvalCase struct {
 
 type Experiment struct {
 	ID        string
+	EvalRunID string
 	Skill     string
+	Cohort    string
 	BaseRef   string
 	HeadRef   string
+	JudgeMode string
 	CreatedAt time.Time
 }
 
@@ -178,6 +181,7 @@ type RefineRun struct {
 type SuggestRun struct {
 	ID         string
 	Skill      string
+	EvalRunID  string
 	MotifKey   string
 	Branch     string
 	CommitSHA  string
@@ -401,20 +405,26 @@ CREATE TABLE IF NOT EXISTS refine_runs (
 CREATE TABLE IF NOT EXISTS suggest_runs (
   id TEXT PRIMARY KEY,
   skill TEXT NOT NULL,
+  eval_run_id TEXT,
   motif_key TEXT NOT NULL,
   branch TEXT NOT NULL,
   commit_sha TEXT NOT NULL,
   pr_body_hash TEXT NOT NULL,
   pr_body_path TEXT NOT NULL DEFAULT '',
   run_ids_json TEXT NOT NULL DEFAULT '[]',
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(eval_run_id) REFERENCES eval_runs(id) ON DELETE SET NULL
 );
 CREATE TABLE IF NOT EXISTS experiments (
   id TEXT PRIMARY KEY,
+  eval_run_id TEXT,
   skill TEXT NOT NULL,
+  cohort TEXT NOT NULL DEFAULT '',
   base_ref TEXT NOT NULL,
   head_ref TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  judge_mode TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(eval_run_id) REFERENCES eval_runs(id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS comparisons (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -460,7 +470,9 @@ CREATE INDEX IF NOT EXISTS idx_promotions_skill_created ON promotions(skill,crea
 CREATE INDEX IF NOT EXISTS idx_refine_runs_run_created ON refine_runs(run_id,created_at);
 CREATE INDEX IF NOT EXISTS idx_refine_runs_skill_created ON refine_runs(skill,created_at);
 CREATE INDEX IF NOT EXISTS idx_suggest_runs_skill_created ON suggest_runs(skill,created_at);
+CREATE INDEX IF NOT EXISTS idx_suggest_runs_eval_run ON suggest_runs(eval_run_id);
 CREATE INDEX IF NOT EXISTS idx_experiments_skill_created ON experiments(skill, created_at);
+CREATE INDEX IF NOT EXISTS idx_experiments_eval_run ON experiments(eval_run_id);
 CREATE INDEX IF NOT EXISTS idx_comparisons_experiment_fixture ON comparisons(experiment_id, fixture_id);
 CREATE INDEX IF NOT EXISTS idx_canary_runs_skill_created ON canary_runs(skill,created_at);
 CREATE INDEX IF NOT EXISTS idx_canary_runs_eval_run ON canary_runs(eval_run_id);
@@ -522,11 +534,29 @@ CREATE INDEX IF NOT EXISTS idx_canary_runs_eval_run ON canary_runs(eval_run_id);
 	if _, err := db.Exec(`ALTER TABLE promotions ADD COLUMN op TEXT NOT NULL DEFAULT 'promote'`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("ensure promotions.op: %w", err)
 	}
+	if _, err := db.Exec(`ALTER TABLE experiments ADD COLUMN eval_run_id TEXT`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("ensure experiments.eval_run_id: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE experiments ADD COLUMN cohort TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("ensure experiments.cohort: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE experiments ADD COLUMN judge_mode TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("ensure experiments.judge_mode: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE suggest_runs ADD COLUMN eval_run_id TEXT`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("ensure suggest_runs.eval_run_id: %w", err)
+	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_canary_runs_skill_created ON canary_runs(skill,created_at)`); err != nil {
 		return fmt.Errorf("ensure idx_canary_runs_skill_created: %w", err)
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_canary_runs_eval_run ON canary_runs(eval_run_id)`); err != nil {
 		return fmt.Errorf("ensure idx_canary_runs_eval_run: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_suggest_runs_eval_run ON suggest_runs(eval_run_id)`); err != nil {
+		return fmt.Errorf("ensure idx_suggest_runs_eval_run: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_experiments_eval_run ON experiments(eval_run_id)`); err != nil {
+		return fmt.Errorf("ensure idx_experiments_eval_run: %w", err)
 	}
 	return nil
 }
@@ -896,11 +926,16 @@ func (s *Store) InsertSuggestRun(ctx context.Context, row SuggestRun) error {
 	if row.CreatedAt.IsZero() {
 		row.CreatedAt = time.Now().UTC()
 	}
+	var evalRunID sql.NullString
+	if row.EvalRunID != "" {
+		evalRunID = sql.NullString{String: row.EvalRunID, Valid: true}
+	}
 	_, err := s.db.ExecContext(
 		ctx,
-		`INSERT INTO suggest_runs(id,skill,motif_key,branch,commit_sha,pr_body_hash,pr_body_path,run_ids_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO suggest_runs(id,skill,eval_run_id,motif_key,branch,commit_sha,pr_body_hash,pr_body_path,run_ids_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		row.ID,
 		row.Skill,
+		evalRunID,
 		row.MotifKey,
 		row.Branch,
 		row.CommitSHA,
@@ -958,13 +993,20 @@ func (s *Store) InsertExperiment(ctx context.Context, row Experiment) error {
 	if row.CreatedAt.IsZero() {
 		row.CreatedAt = time.Now().UTC()
 	}
+	var evalRunID sql.NullString
+	if row.EvalRunID != "" {
+		evalRunID = sql.NullString{String: row.EvalRunID, Valid: true}
+	}
 	_, err := s.db.ExecContext(
 		ctx,
-		`INSERT INTO experiments(id,skill,base_ref,head_ref,created_at) VALUES(?,?,?,?,?)`,
+		`INSERT INTO experiments(id,eval_run_id,skill,cohort,base_ref,head_ref,judge_mode,created_at) VALUES(?,?,?,?,?,?,?,?)`,
 		row.ID,
+		evalRunID,
 		row.Skill,
+		row.Cohort,
 		row.BaseRef,
 		row.HeadRef,
+		row.JudgeMode,
 		row.CreatedAt.UTC().Format(time.RFC3339Nano),
 	)
 	if err != nil {

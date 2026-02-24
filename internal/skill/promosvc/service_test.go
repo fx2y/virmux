@@ -2,6 +2,7 @@ package promosvc
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,18 @@ func (f *fakeExec) Run(_ context.Context, c skillpkg.Command) (skillpkg.CommandR
 		return skillpkg.CommandResult{ExitCode: 0, Stdout: []byte("sha-abc\n")}, nil
 	}
 	return skillpkg.CommandResult{ExitCode: 0}, nil
+}
+
+type failingExec struct {
+	failRef string
+}
+
+func (f failingExec) Run(_ context.Context, c skillpkg.Command) (skillpkg.CommandResult, error) {
+	if c.Name == "git" && len(c.Args) > 1 && c.Args[0] == "rev-parse" &&
+		(c.Args[1] == f.failRef || c.Args[1] == "refs/tags/"+f.failRef) {
+		return skillpkg.CommandResult{ExitCode: 1}, fmt.Errorf("forced rev-parse failure for %s", f.failRef)
+	}
+	return (&fakeExec{}).Run(context.Background(), c)
 }
 
 func seedEvalRun(t *testing.T, dbPath, id string, created time.Time, pass bool, verdictJSON string) {
@@ -103,13 +116,36 @@ func TestServiceRunRollback(t *testing.T) {
 	if res.ToRef != "tag-v1" {
 		t.Fatalf("target mismatch: %s", res.ToRef)
 	}
-	
+
 	var row store.Promotion
 	if err := st.DB().QueryRow(`SELECT id, op, from_ref, to_ref, reason FROM promotions WHERE id=?`, res.ID).Scan(&row.ID, &row.Op, &row.FromRef, &row.ToRef, &row.Reason); err != nil {
 		t.Fatal(err)
 	}
 	if row.Op != "rollback" || row.ToRef != "tag-v1" || row.Reason != "bug in head" {
 		t.Fatalf("db row mismatch: %+v", row)
+	}
+}
+
+func TestServiceRunRollbackFailsWhenCurrentTagResolveFails(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	dbPath := tmp + "/runs/virmux.sqlite"
+	st := mustOpenStore(t, dbPath)
+	defer st.Close()
+	s := Service{
+		Store: st,
+		Exec:  failingExec{failRef: "skill/dd/prod"},
+		Now:   func() time.Time { return time.Unix(1700000001, 0).UTC() },
+	}
+	_, err := s.Run(context.Background(), Input{
+		SkillName: "dd",
+		Rollback:  true,
+		ToRef:     "tag-v1",
+		RepoDir:   tmp,
+		Reason:    "rollback",
+	})
+	if err == nil || !strings.Contains(err.Error(), "resolve current promo tag") {
+		t.Fatalf("expected resolve current promo tag failure, got %v", err)
 	}
 }
 
@@ -138,6 +174,13 @@ func TestServiceRunWritesPromotionAndMovesTag(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("expected one promotion row, got %d", n)
+	}
+	var commitSHA string
+	if err := st.DB().QueryRow(`SELECT commit_sha FROM promotions WHERE id=?`, res.ID).Scan(&commitSHA); err != nil {
+		t.Fatal(err)
+	}
+	if commitSHA != "sha-abc" {
+		t.Fatalf("expected resolved commit_sha, got %s", commitSHA)
 	}
 }
 

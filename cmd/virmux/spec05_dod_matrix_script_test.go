@@ -22,7 +22,7 @@ func TestSpec05DoDMatrixScriptPassesWithFreshEvidence(t *testing.T) {
 	setup := exec.Command("sqlite3", dbPath)
 	setup.Stdin = strings.NewReader(`
 CREATE TABLE eval_runs (id TEXT PRIMARY KEY, skill TEXT, cohort TEXT, pass INTEGER, created_at TEXT);
-CREATE TABLE experiments (id TEXT PRIMARY KEY, skill TEXT, base_ref TEXT, head_ref TEXT, created_at TEXT);
+CREATE TABLE experiments (id TEXT PRIMARY KEY, eval_run_id TEXT, skill TEXT, base_ref TEXT, head_ref TEXT, created_at TEXT);
 CREATE TABLE comparisons (id TEXT PRIMARY KEY, experiment_id TEXT);
 CREATE TABLE promotions (id TEXT PRIMARY KEY, skill TEXT, op TEXT, eval_run_id TEXT, created_at TEXT);
 CREATE TABLE canary_runs (id TEXT PRIMARY KEY, eval_run_id TEXT, action TEXT, caught_by_canary INTEGER, created_at TEXT);
@@ -31,7 +31,7 @@ INSERT INTO eval_runs(id,skill,cohort,pass,created_at) VALUES
   ('c3-fail','dd','qa-skill-c3-20260224',0,'2026-02-24T10:01:00Z'),
   ('c5-pass','dd','qa-skill-c5-20260224',1,'2026-02-24T10:02:00Z'),
   ('c5-fail','dd','qa-skill-c5-20260224',0,'2026-02-24T10:03:00Z');
-INSERT INTO experiments(id,skill,base_ref,head_ref,created_at) VALUES ('exp-1','dd','base','head','2026-02-24T10:04:30Z');
+INSERT INTO experiments(id,eval_run_id,skill,base_ref,head_ref,created_at) VALUES ('exp-1','c3-pass','dd','base','head','2026-02-24T10:04:30Z');
 INSERT INTO comparisons(id,experiment_id) VALUES ('cmp-1','exp-1');
 INSERT INTO promotions(id,skill,op,eval_run_id,created_at) VALUES
   ('promo-1','dd','promote','c3-pass','2026-02-24T10:04:00Z'),
@@ -76,7 +76,7 @@ func TestSpec05DoDMatrixScriptFailsWhenRollbackEvidenceMissing(t *testing.T) {
 	setup := exec.Command("sqlite3", dbPath)
 	setup.Stdin = strings.NewReader(`
 CREATE TABLE eval_runs (id TEXT PRIMARY KEY, skill TEXT, cohort TEXT, pass INTEGER, created_at TEXT);
-CREATE TABLE experiments (id TEXT PRIMARY KEY, skill TEXT, base_ref TEXT, head_ref TEXT, created_at TEXT);
+CREATE TABLE experiments (id TEXT PRIMARY KEY, eval_run_id TEXT, skill TEXT, base_ref TEXT, head_ref TEXT, created_at TEXT);
 CREATE TABLE comparisons (id TEXT PRIMARY KEY, experiment_id TEXT);
 CREATE TABLE promotions (id TEXT PRIMARY KEY, skill TEXT, op TEXT, eval_run_id TEXT, created_at TEXT);
 CREATE TABLE canary_runs (id TEXT PRIMARY KEY, eval_run_id TEXT, action TEXT, caught_by_canary INTEGER, created_at TEXT);
@@ -84,7 +84,7 @@ INSERT INTO eval_runs(id,skill,cohort,pass,created_at) VALUES
   ('c3-pass','dd','qa-skill-c3-20260224',1,'2026-02-24T10:00:00Z'),
   ('c3-fail','dd','qa-skill-c3-20260224',0,'2026-02-24T10:01:00Z'),
   ('c5-pass','dd','qa-skill-c5-20260224',1,'2026-02-24T10:02:00Z');
-INSERT INTO experiments(id,skill,base_ref,head_ref,created_at) VALUES ('exp-1','dd','base','head','2026-02-24T10:04:30Z');
+INSERT INTO experiments(id,eval_run_id,skill,base_ref,head_ref,created_at) VALUES ('exp-1','c3-pass','dd','base','head','2026-02-24T10:04:30Z');
 INSERT INTO comparisons(id,experiment_id) VALUES ('cmp-1','exp-1');
 INSERT INTO promotions(id,skill,op,eval_run_id,created_at) VALUES
   ('promo-1','dd','promote','c3-pass','2026-02-24T10:04:00Z');

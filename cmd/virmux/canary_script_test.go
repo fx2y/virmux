@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -216,6 +217,158 @@ exit 2
 	}
 	if strings.TrimSpace(string(pb)) != "1" {
 		t.Fatalf("expected one rollback promotion row, got %q", string(pb))
+	}
+}
+
+func TestCanaryRunScriptPersistsEvidenceWhenAutoActionFails(t *testing.T) {
+	t.Parallel()
+	repo := newScriptTestRepo(t)
+	dbDir := filepath.Join(repo, "runs")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dbDir, "virmux.sqlite")
+	cmd := exec.Command("sqlite3", dbPath)
+	cmd.Stdin = strings.NewReader(`
+CREATE TABLE eval_runs (
+  id TEXT PRIMARY KEY,
+  skill TEXT NOT NULL,
+  cohort TEXT NOT NULL DEFAULT '',
+  pass INTEGER NOT NULL,
+  score_p50_delta REAL NOT NULL DEFAULT 0,
+  fail_rate_delta REAL NOT NULL DEFAULT 0,
+  cost_delta REAL NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE eval_cases (
+  eval_run_id TEXT NOT NULL,
+  fixture_id TEXT NOT NULL,
+  base_score REAL NOT NULL,
+  head_score REAL NOT NULL,
+  base_pass INTEGER NOT NULL,
+  head_pass INTEGER NOT NULL
+);
+CREATE TABLE canary_runs (
+  id TEXT PRIMARY KEY,
+  skill TEXT NOT NULL,
+  eval_run_id TEXT NOT NULL,
+  curated_eval_run_id TEXT,
+  dset_path TEXT NOT NULL,
+  dset_sha256 TEXT NOT NULL,
+  dset_count INTEGER NOT NULL,
+  candidate_ref TEXT NOT NULL,
+  baseline_ref TEXT NOT NULL,
+  gate_verdict_json TEXT NOT NULL,
+  action TEXT NOT NULL,
+  action_ref TEXT NOT NULL,
+  caught_by_canary INTEGER NOT NULL,
+  backlog_path TEXT NOT NULL,
+  summary_path TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+INSERT INTO eval_runs(id,skill,cohort,pass,score_p50_delta,fail_rate_delta,cost_delta,created_at)
+VALUES ('ab-canary-pass','dd','qa-skill-c5-20260224',1,0.4,-0.2,0.1,'2026-02-24T00:00:00Z');
+`)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("sqlite setup failed: %v\n%s", err, string(out))
+	}
+
+	if err := os.MkdirAll(filepath.Join(repo, "dsets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dsetPath := filepath.Join(repo, "dsets", "prod_20260224.jsonl")
+	mustWriteScriptFixtureFile(t, dsetPath, `{"id":"prod-1","input":{},"context_refs":[],"expected_properties":{},"tags":["core"]}`+"\n")
+
+	binDir := filepath.Join(repo, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteScriptFixtureFile(t, filepath.Join(binDir, "go"), `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == *" skill ab "* ]]; then
+  echo '{"id":"ab-canary-pass","pass":true,"reason":"ok"}'
+  exit 0
+fi
+if [[ "$*" == *" skill promote "* ]]; then
+  echo '{"error":"promote failed"}' >&2
+  exit 9
+fi
+echo "unsupported mocked go invocation: $*" >&2
+exit 2
+`)
+	if err := os.Chmod(filepath.Join(binDir, "go"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runScriptFromRepoWithEnv(t, repo, []string{"PATH=" + binDir + ":" + os.Getenv("PATH")}, "canary_run.sh",
+		"--skill", "dd",
+		"--candidate-ref", "head-sha",
+		"--baseline-ref", "base-sha",
+		"--dset", dsetPath,
+		"--db", dbPath,
+		"--runs-dir", filepath.Join(repo, "runs"),
+		"--repo-dir", repo,
+		"--skills-dir", "skills",
+	)
+	if err == nil {
+		t.Fatalf("expected action failure exit, output:\n%s", out)
+	}
+	q := exec.Command("sqlite3", dbPath, `SELECT action,summary_path FROM canary_runs WHERE eval_run_id='ab-canary-pass'`)
+	qb, qerr := q.CombinedOutput()
+	if qerr != nil {
+		t.Fatalf("query canary_runs failed: %v\n%s", qerr, string(qb))
+	}
+	parts := strings.Split(strings.TrimSpace(string(qb)), "|")
+	if len(parts) != 2 || parts[0] != "promote" || parts[1] == "" {
+		t.Fatalf("unexpected canary row: %q", string(qb))
+	}
+	summaryBytes, serr := os.ReadFile(filepath.Join(repo, parts[1]))
+	if serr != nil {
+		t.Fatalf("read summary failed: %v", serr)
+	}
+	var summary map[string]any
+	if err := json.Unmarshal(summaryBytes, &summary); err != nil {
+		t.Fatalf("parse summary json: %v\n%s", err, string(summaryBytes))
+	}
+	action, _ := summary["action"].(map[string]any)
+	if int(action["exit_code"].(float64)) != 9 {
+		t.Fatalf("expected action exit_code=9 in summary, got:\n%s", string(summaryBytes))
+	}
+}
+
+func TestCanaryRunRejectsInvalidSkillToken(t *testing.T) {
+	t.Parallel()
+	repo := newScriptTestRepo(t)
+	runsDir := filepath.Join(repo, "runs")
+	if err := os.MkdirAll(runsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(runsDir, "virmux.sqlite")
+	setup := exec.Command("sqlite3", dbPath)
+	if out, err := setup.CombinedOutput(); err != nil {
+		t.Fatalf("sqlite setup failed: %v\n%s", err, string(out))
+	}
+	if err := os.MkdirAll(filepath.Join(repo, "dsets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dsetPath := filepath.Join(repo, "dsets", "prod_20260224.jsonl")
+	mustWriteScriptFixtureFile(t, dsetPath, `{"id":"prod-1","input":{},"context_refs":[],"expected_properties":{},"tags":["core"]}`+"\n")
+	out, err := runScriptFromRepo(t, repo, "canary_run.sh",
+		"--skill", "dd;drop",
+		"--candidate-ref", "head-sha",
+		"--baseline-ref", "base-sha",
+		"--dset", dsetPath,
+		"--db", dbPath,
+		"--runs-dir", filepath.Join(repo, "runs"),
+		"--repo-dir", repo,
+		"--skills-dir", "skills",
+		"--no-auto-action",
+	)
+	if err == nil {
+		t.Fatalf("expected invalid skill token failure, output:\n%s", out)
+	}
+	if !strings.Contains(out, "invalid --skill token") {
+		t.Fatalf("expected invalid token message, got:\n%s", out)
 	}
 }
 

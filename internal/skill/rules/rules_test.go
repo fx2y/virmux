@@ -1,12 +1,16 @@
 package rules
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/haris/virmux/internal/skill/judge"
+	"github.com/haris/virmux/internal/store"
+	"github.com/haris/virmux/internal/trace"
 )
 
 func TestRuleEngine(t *testing.T) {
@@ -17,8 +21,6 @@ func TestRuleEngine(t *testing.T) {
 	defer os.RemoveAll(tmp)
 
 	dbPath := filepath.Join(tmp, "virmux.sqlite")
-	// For now we don't need a real DB if we don't test VerifyReplayHashes or we mock it.
-	// But let's at least check if Evaluate runs.
 
 	e := &Engine{
 		DBPath:  dbPath,
@@ -30,8 +32,54 @@ func TestRuleEngine(t *testing.T) {
 	if err := os.MkdirAll(runDir, 0755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(runDir, "toolio"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	reqRaw := []byte(`{"req":1,"tool":"shell.exec","args":{"cmd":"echo ok"}}` + "\n")
+	resRaw := []byte(`{"req":1,"ok":true}` + "\n")
+	reqHash := trace.SHA256Hex(bytes.TrimSuffix(reqRaw, []byte{'\n'}))
+	resHash := trace.SHA256Hex(bytes.TrimSuffix(resRaw, []byte{'\n'}))
+	if err := os.WriteFile(filepath.Join(runDir, "toolio", "000001.req.json"), reqRaw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "toolio", "000001.res.json"), resRaw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	traceLine := `{"ts":"2026-02-24T00:00:00Z","run_id":"run-1","seq":1,"type":"tool","task":"skill:run","event":"vm.tool.result","tool":"shell.exec","args_hash":"` + reqHash + `","output_hash":"` + resHash + `","payload":{"tool_seq":1,"tool":"shell.exec","input_hash":"` + reqHash + `","output_hash":"` + resHash + `"}}` + "\n"
+	if err := os.WriteFile(filepath.Join(runDir, "trace.ndjson"), []byte(traceLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	meta := `{"budget":{"tool_calls":5}}`
 	if err := os.WriteFile(filepath.Join(runDir, "skill-run.json"), []byte(meta), 0644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.StartRun(context.Background(), store.Run{
+		ID:        "run-1",
+		Task:      "skill:run",
+		Label:     "rules",
+		AgentID:   "default",
+		ImageSHA:  "img",
+		KernelSHA: "k",
+		RootfsSHA: "r",
+		StartedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertToolCall(context.Background(), store.ToolCall{
+		RunID:      "run-1",
+		Seq:        1,
+		ReqID:      1,
+		Tool:       "shell.exec",
+		InputHash:  reqHash,
+		OutputHash: resHash,
+		InputRef:   "toolio/000001.req.json",
+		OutputRef:  "toolio/000001.res.json",
+	}); err != nil {
 		t.Fatal(err)
 	}
 

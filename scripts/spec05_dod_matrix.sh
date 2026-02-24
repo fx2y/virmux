@@ -28,15 +28,17 @@ done
 [[ -f "$root/tmp/skill-sql-cert-summary.json" ]] || { echo "spec05:dod: missing tmp/skill-sql-cert-summary.json" >&2; exit 1; }
 
 fresh_filter=""
+fresh_filter_er=""
 if [[ -n "$cert_ts" ]]; then
   fresh_filter=" AND datetime(created_at) >= datetime('${cert_ts}')"
+  fresh_filter_er=" AND datetime(er.created_at) >= datetime('${cert_ts}')"
 fi
 
 c3_eval_total="$(sqlite3 "$db" "SELECT COUNT(*) FROM eval_runs WHERE cohort LIKE 'qa-skill-c3-%'${fresh_filter};")"
 c3_eval_pass="$(sqlite3 "$db" "SELECT COUNT(*) FROM eval_runs WHERE cohort LIKE 'qa-skill-c3-%' AND pass=1${fresh_filter};")"
 c3_eval_fail="$(sqlite3 "$db" "SELECT COUNT(*) FROM eval_runs WHERE cohort LIKE 'qa-skill-c3-%' AND pass=0${fresh_filter};")"
-exp_rows="$(sqlite3 "$db" "SELECT COUNT(*) FROM experiments WHERE skill='dd'${fresh_filter};")"
-comp_rows="$(sqlite3 "$db" "SELECT COUNT(*) FROM comparisons WHERE experiment_id IN (SELECT id FROM experiments WHERE skill='dd'${fresh_filter});")"
+exp_rows="$(sqlite3 "$db" "SELECT COUNT(*) FROM experiments e JOIN eval_runs er ON er.id=e.eval_run_id WHERE er.cohort LIKE 'qa-skill-c3-%'${fresh_filter_er};")"
+comp_rows="$(sqlite3 "$db" "SELECT COUNT(*) FROM comparisons c JOIN experiments e ON e.id=c.experiment_id JOIN eval_runs er ON er.id=e.eval_run_id WHERE er.cohort LIKE 'qa-skill-c3-%'${fresh_filter_er};")"
 promo_rows="$(sqlite3 "$db" "SELECT COUNT(*) FROM promotions WHERE eval_run_id IN (SELECT id FROM eval_runs WHERE (cohort LIKE 'qa-skill-c3-%' OR cohort LIKE 'qa-skill-c5-%')${fresh_filter});")"
 rollback_rows="$(sqlite3 "$db" "SELECT COUNT(*) FROM promotions WHERE op='rollback' AND eval_run_id IN (SELECT id FROM eval_runs WHERE cohort LIKE 'qa-skill-c5-%'${fresh_filter});")"
 canary_rows="$(sqlite3 "$db" "SELECT COUNT(*) FROM canary_runs WHERE eval_run_id IN (SELECT id FROM eval_runs WHERE cohort LIKE 'qa-skill-c5-%'${fresh_filter});")"

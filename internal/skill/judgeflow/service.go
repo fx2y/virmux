@@ -44,6 +44,7 @@ type Input struct {
 	ExpectFile []string
 	Mode       string // rules, llm_abs, llm_probe
 	ModelID    string
+	ReadOnly   bool
 }
 
 type Result struct {
@@ -52,19 +53,29 @@ type Result struct {
 }
 
 func (s Service) Run(ctx context.Context, in Input) (Result, error) {
-	if s.Emit == nil || s.InsertScore == nil || s.InsertJudgeRun == nil || s.PersistArtifacts == nil {
+	mode := strings.TrimSpace(in.Mode)
+	if mode == "" {
+		mode = "rules"
+		in.Mode = mode
+	}
+	if mode != "rules" {
+		return Result{}, fmt.Errorf("JUDGE_INVALID: unsupported judge mode %q (only rules mode is implemented)", mode)
+	}
+	if !in.ReadOnly && (s.Emit == nil || s.InsertScore == nil || s.InsertJudgeRun == nil || s.PersistArtifacts == nil) {
 		return Result{}, errors.New("judgeflow missing required ports")
 	}
 	now := time.Now
 	if s.Now != nil {
 		now = s.Now
 	}
-	if err := s.Emit(ctx, "skill.judge.started", map[string]any{
-		"skill":       in.Skill,
-		"rubric":      filepath.ToSlash(in.RubricPath),
-		"rubric_hash": in.RubricHash,
-	}); err != nil {
-		return Result{}, err
+	if !in.ReadOnly {
+		if err := s.Emit(ctx, "skill.judge.started", map[string]any{
+			"skill":       in.Skill,
+			"rubric":      filepath.ToSlash(in.RubricPath),
+			"rubric_hash": in.RubricHash,
+		}); err != nil {
+			return Result{}, err
+		}
 	}
 
 	ev := skilljudge.Evidence{
@@ -78,49 +89,65 @@ func (s Service) Run(ctx context.Context, in Input) (Result, error) {
 		ModelID:     in.ModelID,
 	}
 
-	res, err := skilljudge.Evaluate(in.Rubric, in.RubricHash, ev)
-	if err != nil {
-		return Result{}, err
-	}
-
-	// Add rule engine results
 	ruleEngine := &rules.Engine{
 		DBPath:  s.DBPath,
 		RunsDir: s.RunsDir,
 	}
 	ruleResults, err := ruleEngine.Evaluate(ctx, ev)
-	if err == nil {
-		for _, rr := range ruleResults {
-			found := false
-			for i, c := range res.Criterion {
-				if c.ID == rr.ID {
-					res.Criterion[i].Value = rr.Value
-					res.Criterion[i].Pass = rr.Pass
-					res.Criterion[i].Reason = rr.Reason
-					found = true
-					break
-				}
-			}
-			if !rr.Pass {
-				res.Critique = append(res.Critique, rr.Reason)
-			}
-			_ = found // for now we don't add non-rubric criteria
-		}
-		// Re-calculate score and pass if rules modified criteria
-		res.Score = 0
-		mustOK := true
-		for _, c := range res.Criterion {
-			res.Score += c.Weight * c.Value
-			if c.Must && !c.Pass {
-				mustOK = false
-			}
-		}
-		res.Pass = res.Score >= in.Rubric.Pass && mustOK
-		sort.Strings(res.Critique)
-		res.Critique = dedupe(res.Critique)
+	if err != nil {
+		return Result{}, fmt.Errorf("rule evaluation failed: %w", err)
 	}
 
-	scorePath, err := skillrun.EnsureScorePlaceholder(in.RunDir, map[string]any{
+	res, err := skilljudge.Evaluate(in.Rubric, in.RubricHash, ev)
+	if err != nil {
+		return Result{}, err
+	}
+
+	for _, rr := range ruleResults {
+		matched := false
+		for i, c := range res.Criterion {
+			if c.ID != rr.ID {
+				continue
+			}
+			res.Criterion[i].Value = rr.Value
+			res.Criterion[i].Pass = rr.Pass
+			res.Criterion[i].Reason = rr.Reason
+			matched = true
+			break
+		}
+		if !matched {
+			res.Criterion = append(res.Criterion, skilljudge.CriterionScore{
+				ID:     rr.ID,
+				Weight: 0,
+				Value:  rr.Value,
+				Pass:   rr.Pass,
+				Must:   true,
+				Reason: rr.Reason,
+			})
+		}
+		if !rr.Pass {
+			if strings.TrimSpace(rr.Reason) != "" {
+				res.Critique = append(res.Critique, rr.Reason)
+			} else {
+				res.Critique = append(res.Critique, rr.ID+" failed")
+			}
+		}
+	}
+	// Recalculate terminal score/pass after rule overrides.
+	res.Score = 0
+	mustOK := true
+	for _, c := range res.Criterion {
+		res.Score += c.Weight * c.Value
+		if c.Must && !c.Pass {
+			mustOK = false
+		}
+	}
+	res.Pass = res.Score >= in.Rubric.Pass && mustOK
+	sort.Strings(res.Critique)
+	res.Critique = dedupe(res.Critique)
+
+	scoreDoc := map[string]any{
+		"version":        skilljudge.SchemaVersion,
 		"run_id":         res.RunID,
 		"skill":          res.Skill,
 		"score":          res.Score,
@@ -132,7 +159,19 @@ func (s Service) Run(ctx context.Context, in Input) (Result, error) {
 		"artifact_hash":  res.ArtifactHash,
 		"mode":           res.Mode,
 		"model_id":       res.ModelID,
-	})
+	}
+	scoreJSON, err := json.Marshal(scoreDoc)
+	if err != nil {
+		return Result{}, err
+	}
+	if _, err := skilljudge.ValidateOutput(scoreJSON); err != nil {
+		return Result{}, fmt.Errorf("JUDGE_INVALID: %w", err)
+	}
+	if in.ReadOnly {
+		return Result{Judge: res}, nil
+	}
+
+	scorePath, err := skillrun.EnsureScorePlaceholder(in.RunDir, scoreDoc)
 	if err != nil {
 		return Result{}, err
 	}

@@ -3,6 +3,7 @@ package rules
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,15 +27,26 @@ type Engine struct {
 }
 
 func (e *Engine) Evaluate(ctx context.Context, ev judge.Evidence) ([]RuleResult, error) {
+	if strings.TrimSpace(e.DBPath) == "" {
+		return nil, errors.New("rule engine requires db path")
+	}
+	if strings.TrimSpace(ev.RunDir) == "" || strings.TrimSpace(ev.RunID) == "" {
+		return nil, errors.New("rule engine requires run dir/id")
+	}
 	var results []RuleResult
 
 	// 1. Rule Replay
 	replayRes, err := run.VerifyReplayHashes(e.DBPath, ev.RunDir, ev.RunID)
-	replayPass := err == nil && replayRes.Verified
-	replayReason := ""
 	if err != nil {
-		replayReason = err.Error()
-	} else if !replayRes.Verified {
+		msg := err.Error()
+		if !strings.Contains(msg, "replay mismatch") {
+			return nil, fmt.Errorf("rule_replay: %w", err)
+		}
+		replayRes = run.ReplayReport{Verified: false, Mismatch: msg}
+	}
+	replayPass := replayRes.Verified
+	replayReason := ""
+	if !replayRes.Verified {
 		replayReason = replayRes.Mismatch
 	}
 	results = append(results, RuleResult{
@@ -47,28 +59,22 @@ func (e *Engine) Evaluate(ctx context.Context, ev judge.Evidence) ([]RuleResult,
 	// 2. Budget Ceilings (Time/Cost)
 	// We load skill-run.json to get actual usage and budget
 	meta, err := readSkillRunMeta(ev.RunDir)
-	if err == nil {
-		// Time ceiling
-		if meta.Budget.Seconds > 0 {
-			// We need to know how long the run took.
-			// This info is in runs table, but we might not have it easily here.
-			// For now we can check trace for timestamps or just skip if not easily available.
-			// Actually, let's look at internal/skill/run/core.go BudgetTracker.
+	if err != nil {
+		return nil, fmt.Errorf("rule_meta: %w", err)
+	}
+	// Time ceiling reserved for future wallclock extraction from run/event rows.
+	if meta.Budget.ToolCalls > 0 {
+		pass := ev.ToolCalls <= meta.Budget.ToolCalls
+		reason := ""
+		if !pass {
+			reason = fmt.Sprintf("tool_calls exceeded budget (%d > %d)", ev.ToolCalls, meta.Budget.ToolCalls)
 		}
-		// Tool calls ceiling
-		if meta.Budget.ToolCalls > 0 {
-			pass := ev.ToolCalls <= meta.Budget.ToolCalls
-			reason := ""
-			if !pass {
-				reason = fmt.Sprintf("tool_calls exceeded budget (%d > %d)", ev.ToolCalls, meta.Budget.ToolCalls)
-			}
-			results = append(results, RuleResult{
-				ID:     "rule_budget_tool_calls",
-				Value:  boolToFloat(pass),
-				Pass:   pass,
-				Reason: reason,
-			})
-		}
+		results = append(results, RuleResult{
+			ID:     "rule_budget_tool_calls",
+			Value:  boolToFloat(pass),
+			Pass:   pass,
+			Reason: reason,
+		})
 	}
 
 	// 3. JSON Schema / Required Sections

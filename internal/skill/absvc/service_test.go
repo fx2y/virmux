@@ -59,6 +59,37 @@ func (fakeExec) Run(_ context.Context, c skillpkg.Command) (skillpkg.CommandResu
 	return skillpkg.CommandResult{}, fmt.Errorf("unexpected command %s %v", c.Name, c.Args)
 }
 
+type fakeExecTie struct{}
+
+func (fakeExecTie) Run(_ context.Context, c skillpkg.Command) (skillpkg.CommandResult, error) {
+	if c.Name == "git" {
+		return (fakeExec{}).Run(context.Background(), c)
+	}
+	if c.Name == "pf" {
+		if len(c.Args) > 0 && c.Args[0] == "validate" {
+			return skillpkg.CommandResult{ExitCode: 0}, nil
+		}
+		if len(c.Args) > 0 && c.Args[0] == "eval" {
+			var outPath string
+			for i := 0; i < len(c.Args)-1; i++ {
+				if c.Args[i] == "--output" {
+					outPath = c.Args[i+1]
+					break
+				}
+			}
+			if outPath == "" {
+				return skillpkg.CommandResult{}, fmt.Errorf("missing --output")
+			}
+			body := `{"results":[{"metadata":{"fixture_id":"case01"},"score":0.8,"success":true,"cost":1.0}]}`
+			if err := os.WriteFile(outPath, []byte(body), 0o644); err != nil {
+				return skillpkg.CommandResult{}, err
+			}
+			return skillpkg.CommandResult{ExitCode: 0}, nil
+		}
+	}
+	return skillpkg.CommandResult{}, fmt.Errorf("unexpected command %s %v", c.Name, c.Args)
+}
+
 func TestServiceRunPersistsEvalRowsAndFrozenFixtures(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
@@ -146,6 +177,13 @@ func TestServicePairwiseMode(t *testing.T) {
 	if expCount != 1 {
 		t.Fatalf("expected one experiment row, got %d", expCount)
 	}
+	var linkedEvalID string
+	if err := st.DB().QueryRow(`SELECT eval_run_id FROM experiments WHERE id=?`, res.ExperimentID).Scan(&linkedEvalID); err != nil {
+		t.Fatal(err)
+	}
+	if linkedEvalID != res.EvalID {
+		t.Fatalf("expected experiment eval link %s, got %s", res.EvalID, linkedEvalID)
+	}
 
 	var compCount int
 	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM comparisons WHERE experiment_id=?`, res.ExperimentID).Scan(&compCount); err != nil {
@@ -161,5 +199,74 @@ func TestServicePairwiseMode(t *testing.T) {
 	}
 	if report.WinsB != 1 || report.WinsA != 0 || report.Ties != 0 {
 		t.Fatalf("report mismatch: %+v", report)
+	}
+}
+
+func TestServiceRunRejectsUnknownJudgeMode(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	runsDir := filepath.Join(tmp, "runs")
+	dbPath := filepath.Join(runsDir, "virmux.sqlite")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	svc := Service{Store: st, Exec: fakeExec{}, Now: func() time.Time { return time.Unix(1700000000, 0).UTC() }}
+	_, err = svc.Run(context.Background(), Input{
+		RepoDir:      tmp,
+		SkillsDir:    "skills",
+		RunsDir:      runsDir,
+		SkillName:    "dd",
+		BaseRef:      "b1",
+		HeadRef:      "h1",
+		Provider:     "openai:gpt-4.1-mini",
+		PromptfooBin: "pf",
+		TimeoutSec:   30,
+		JudgeMode:    "typo",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid --judge mode") {
+		t.Fatalf("expected invalid judge mode error, got %v", err)
+	}
+}
+
+func TestServicePairwiseModeNeverReturnsTieWhenBothPass(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	runsDir := filepath.Join(tmp, "runs")
+	dbPath := filepath.Join(runsDir, "virmux.sqlite")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	svc := Service{Store: st, Exec: fakeExecTie{}, Now: func() time.Time { return time.Unix(1700000000, 0).UTC() }}
+	res, err := svc.Run(context.Background(), Input{
+		RepoDir:      tmp,
+		SkillsDir:    "skills",
+		RunsDir:      runsDir,
+		SkillName:    "dd",
+		BaseRef:      "b1",
+		HeadRef:      "h1",
+		Provider:     "openai:gpt-4.1-mini",
+		PromptfooBin: "pf",
+		TimeoutSec:   30,
+		JudgeMode:    "pairwise",
+		AntiTie:      false,
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Winner == "tie" {
+		t.Fatalf("expected non-tie winner when both sides pass")
+	}
+	var winner string
+	if err := st.DB().QueryRow(`SELECT winner FROM comparisons WHERE experiment_id=? LIMIT 1`, res.ExperimentID).Scan(&winner); err != nil {
+		t.Fatal(err)
+	}
+	if winner == "tie" {
+		t.Fatalf("comparison winner should not be tie when both pass")
 	}
 }

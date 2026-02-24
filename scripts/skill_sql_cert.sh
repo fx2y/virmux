@@ -30,15 +30,17 @@ if [[ ! -f "$db" ]]; then
 fi
 
 fresh_filter=""
+fresh_filter_er=""
 if [[ -n "$cert_ts" ]]; then
   fresh_filter=" AND datetime(created_at) >= datetime('${cert_ts}')"
+  fresh_filter_er=" AND datetime(er.created_at) >= datetime('${cert_ts}')"
 fi
 
 rows_total="$(sqlite3 "$db" "SELECT COUNT(*) FROM eval_runs WHERE cohort LIKE '$cohort_c3_glob'${fresh_filter};")"
 rows_pass="$(sqlite3 "$db" "SELECT COUNT(*) FROM eval_runs WHERE cohort LIKE '$cohort_c3_glob' AND pass=1${fresh_filter};")"
 rows_fail="$(sqlite3 "$db" "SELECT COUNT(*) FROM eval_runs WHERE cohort LIKE '$cohort_c3_glob' AND pass=0${fresh_filter};")"
-rows_exp="$(sqlite3 "$db" "SELECT COUNT(*) FROM experiments WHERE skill='dd'${fresh_filter};")"
-rows_comp="$(sqlite3 "$db" "SELECT COUNT(*) FROM comparisons WHERE experiment_id IN (SELECT id FROM experiments WHERE skill='dd'${fresh_filter});")"
+rows_exp="$(sqlite3 "$db" "SELECT COUNT(*) FROM experiments e JOIN eval_runs er ON er.id=e.eval_run_id WHERE er.cohort LIKE '$cohort_c3_glob'${fresh_filter_er};")"
+rows_comp="$(sqlite3 "$db" "SELECT COUNT(*) FROM comparisons c JOIN experiments e ON e.id=c.experiment_id JOIN eval_runs er ON er.id=e.eval_run_id WHERE er.cohort LIKE '$cohort_c3_glob'${fresh_filter_er};")"
 
 rows_promo_total="$(sqlite3 "$db" "SELECT COUNT(*) FROM promotions WHERE eval_run_id IN (SELECT id FROM eval_runs WHERE (cohort LIKE '$cohort_c3_glob' OR cohort LIKE '$cohort_c5_glob')${fresh_filter});")"
 rows_promo_promote="$(sqlite3 "$db" "SELECT COUNT(*) FROM promotions WHERE op='promote' AND eval_run_id IN (SELECT id FROM eval_runs WHERE (cohort LIKE '$cohort_c3_glob' OR cohort LIKE '$cohort_c5_glob')${fresh_filter});")"

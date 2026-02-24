@@ -43,6 +43,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$skill" && -n "$candidate_ref" ]] || usage
+[[ "$skill" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || { echo "canary:run: invalid --skill token (expected kebab-case)" >&2; exit 1; }
 [[ "$max_age_hours" =~ ^[0-9]+$ ]] || { echo "canary:run: --max-age-hours must be integer" >&2; exit 1; }
 [[ -f "$db" ]] || { echo "canary:run: missing db $db" >&2; exit 1; }
 
@@ -95,13 +96,14 @@ fi
 dset_sha="$(sha256sum "$dset" | awk '{print $1}')"
 dset_count="$(wc -l < "$dset" | tr -d ' ')"
 
-IFS='|' read -r pass score_delta fail_delta cost_delta <<<"$(sqlite3 "$db" "SELECT pass,score_p50_delta,fail_rate_delta,cost_delta FROM eval_runs WHERE id='${eval_id}';")"
+esc() { printf "%s" "$1" | sed "s/'/''/g"; }
+IFS='|' read -r pass score_delta fail_delta cost_delta <<<"$(sqlite3 "$db" "SELECT pass,score_p50_delta,fail_rate_delta,cost_delta FROM eval_runs WHERE id='$(esc "$eval_id")';")"
 if [[ -z "$pass" ]]; then
   echo "canary:run: eval row not found for $eval_id" >&2
   exit 1
 fi
 
-curated_eval_id="$(sqlite3 "$db" "SELECT id FROM eval_runs WHERE skill='${skill}' AND cohort LIKE 'qa-skill-c3-%' AND pass=1 ORDER BY datetime(created_at) DESC, id DESC LIMIT 1;")"
+curated_eval_id="$(sqlite3 "$db" "SELECT id FROM eval_runs WHERE skill='$(esc "$skill")' AND cohort LIKE 'qa-skill-c3-%' AND pass=1 ORDER BY datetime(created_at) DESC, id DESC LIMIT 1;")"
 caught_by_canary=0
 if [[ "$pass" -eq 0 && -n "$curated_eval_id" ]]; then
   caught_by_canary=1
@@ -110,7 +112,10 @@ fi
 action="none"
 action_ref=""
 backlog_path=""
-promote_output=""
+action_stdout=""
+action_stderr=""
+action_rc=0
+action_error=""
 
 if [[ "$pass" -eq 1 ]]; then
   action="promote"
@@ -121,8 +126,14 @@ else
 fi
 
 if [[ "$auto_action" -eq 1 ]]; then
+  action_out_file="$(mktemp)"
+  action_err_file="$(mktemp)"
+  trap 'rm -f "$ab_out_file" "$action_out_file" "$action_err_file"' EXIT
   if [[ "$action" == "promote" ]]; then
-    promote_output="$(go run ./cmd/virmux skill promote --db "$db" --repo-dir "$repo_dir" --max-age-hours "$max_age_hours" --reason "canary pass eval=${eval_id} dset=$(basename "$dset")" "$skill" "$eval_id")"
+    set +e
+    go run ./cmd/virmux skill promote --db "$db" --repo-dir "$repo_dir" --max-age-hours "$max_age_hours" --reason "canary pass eval=${eval_id} dset=$(basename "$dset")" "$skill" "$eval_id" >"$action_out_file" 2>"$action_err_file"
+    action_rc=$?
+    set -e
   else
     eval_dir="$runs_dir/$eval_id"
     mkdir -p "$eval_dir"
@@ -141,9 +152,17 @@ if [[ "$auto_action" -eq 1 ]]; then
       echo "- cost_delta: $cost_delta"
       echo
       echo "## Top failing fixtures (head failed, base passed)"
-      sqlite3 -line "$db" "SELECT fixture_id, base_score, head_score FROM eval_cases WHERE eval_run_id='${eval_id}' AND base_pass=1 AND head_pass=0 ORDER BY (base_score-head_score) DESC, fixture_id ASC LIMIT 10;"
+      sqlite3 -line "$db" "SELECT fixture_id, base_score, head_score FROM eval_cases WHERE eval_run_id='$(esc "$eval_id")' AND base_pass=1 AND head_pass=0 ORDER BY (base_score-head_score) DESC, fixture_id ASC LIMIT 10;"
     } > "$backlog_path"
-    promote_output="$(go run ./cmd/virmux skill promote --db "$db" --repo-dir "$repo_dir" --rollback --to-ref "$baseline_ref" --reason "canary regression eval=${eval_id} dset=$(basename "$dset")" "$skill")"
+    set +e
+    go run ./cmd/virmux skill promote --db "$db" --repo-dir "$repo_dir" --rollback --to-ref "$baseline_ref" --reason "canary regression eval=${eval_id} dset=$(basename "$dset")" "$skill" >"$action_out_file" 2>"$action_err_file"
+    action_rc=$?
+    set -e
+  fi
+  action_stdout="$(cat "$action_out_file")"
+  action_stderr="$(cat "$action_err_file")"
+  if [[ "$action_rc" -ne 0 ]]; then
+    action_error="auto-action failed rc=$action_rc"
   fi
 fi
 
@@ -163,9 +182,12 @@ jq -n -S \
   --arg action "$action" \
   --arg action_ref "$action_ref" \
   --arg backlog_path "${backlog_path#$root/}" \
-  --arg promote_output "$promote_output" \
+  --arg action_stdout "$action_stdout" \
+  --arg action_stderr "$action_stderr" \
+  --arg action_error "$action_error" \
   --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --argjson ab_rc "$ab_rc" \
+  --argjson action_rc "$action_rc" \
   --argjson pass "$pass" \
   --argjson dset_count "$dset_count" \
   --argjson score_delta "$score_delta" \
@@ -173,10 +195,8 @@ jq -n -S \
   --argjson cost_delta "$cost_delta" \
   --argjson caught_by_canary "$caught_by_canary" \
   --argjson auto_action "$auto_action" \
-  '{id:$id,skill:$skill,eval_run_id:$eval_run_id,curated_eval_run_id:$curated_eval_run_id,cohort:$cohort,dset_path:$dset_path,dset_sha256:$dset_sha256,dset_count:$dset_count,baseline_ref:$baseline_ref,candidate_ref:$candidate_ref,gates:{pass:($pass==1),score_p50_delta:$score_delta,fail_rate_delta:$fail_delta,cost_delta:$cost_delta,ab_exit_code:$ab_rc},action:{selected:$action,ref:$action_ref,auto:($auto_action==1),stdout:$promote_output},caught_by_canary:($caught_by_canary==1),backlog_path:$backlog_path,generated_at:$generated_at}' \
+  '{id:$id,skill:$skill,eval_run_id:$eval_run_id,curated_eval_run_id:$curated_eval_run_id,cohort:$cohort,dset_path:$dset_path,dset_sha256:$dset_sha256,dset_count:$dset_count,baseline_ref:$baseline_ref,candidate_ref:$candidate_ref,gates:{pass:($pass==1),score_p50_delta:$score_delta,fail_rate_delta:$fail_delta,cost_delta:$cost_delta,ab_exit_code:$ab_rc},action:{selected:$action,ref:$action_ref,auto:($auto_action==1),exit_code:$action_rc,stdout:$action_stdout,stderr:$action_stderr,error:$action_error},caught_by_canary:($caught_by_canary==1),backlog_path:$backlog_path,generated_at:$generated_at}' \
   > "$summary_path"
-
-esc() { printf "%s" "$1" | sed "s/'/''/g"; }
 summary_json="$(jq -c '{pass:.gates.pass,score_p50_delta:.gates.score_p50_delta,fail_rate_delta:.gates.fail_rate_delta,cost_delta:.gates.cost_delta,ab_exit_code:.gates.ab_exit_code}' "$summary_path")"
 curated_sql="NULL"
 if [[ -n "$curated_eval_id" ]]; then
@@ -207,6 +227,10 @@ INSERT INTO canary_runs(
 "
 
 cat "$summary_path"
+if [[ "$action_rc" -ne 0 ]]; then
+  echo "canary:run: auto action failed eval=$eval_id action=$action rc=$action_rc" >&2
+  exit 1
+fi
 if [[ "$pass" -ne 1 ]]; then
   echo "canary:run: regression detected eval=$eval_id action=$action caught_by_canary=$caught_by_canary" >&2
   exit 1

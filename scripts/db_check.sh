@@ -27,7 +27,7 @@ required_indexes+=(idx_scores_run_created idx_scores_skill_pass idx_judge_runs_r
 required_indexes+=(idx_judge_runs_skill_created_mode)
 required_indexes+=(idx_eval_runs_skill_created idx_eval_runs_cohort_created idx_eval_cases_run_fixture idx_promotions_skill_created)
 required_indexes+=(idx_refine_runs_run_created idx_refine_runs_skill_created)
-required_indexes+=(idx_suggest_runs_skill_created idx_experiments_skill_created idx_comparisons_experiment_fixture idx_canary_runs_skill_created idx_canary_runs_eval_run)
+required_indexes+=(idx_suggest_runs_skill_created idx_suggest_runs_eval_run idx_experiments_skill_created idx_experiments_eval_run idx_comparisons_experiment_fixture idx_canary_runs_skill_created idx_canary_runs_eval_run)
 for idx in "${required_indexes[@]}"; do
   c="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='$idx';")"
   if [[ "$c" != "1" ]]; then
@@ -48,6 +48,8 @@ eval_cases_table="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type
 [[ "$eval_cases_table" == "1" ]] || { echo "db:check: missing table: eval_cases" >&2; exit 1; }
 promotions_table="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='promotions';")"
 [[ "$promotions_table" == "1" ]] || { echo "db:check: missing table: promotions" >&2; exit 1; }
+promotions_eval_run_notnull="$(sqlite3 "$db" "SELECT COALESCE((SELECT \"notnull\" FROM pragma_table_info('promotions') WHERE name='eval_run_id'),1);")"
+[[ "$promotions_eval_run_notnull" == "0" ]] || { echo "db:check: promotions.eval_run_id must be nullable for rollback compatibility" >&2; exit 1; }
 refine_runs_table="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='refine_runs';")"
 [[ "$refine_runs_table" == "1" ]] || { echo "db:check: missing table: refine_runs" >&2; exit 1; }
 suggest_runs_table="$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='suggest_runs';")"

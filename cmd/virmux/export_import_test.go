@@ -328,6 +328,7 @@ func TestExportImportEvalBundleRoundTrip(t *testing.T) {
 	}
 	ctx := context.Background()
 	evalID := "ab-eval-bundle"
+	expID := evalID + "-exp"
 	created := time.Date(2026, 2, 24, 0, 0, 0, 0, time.UTC)
 	if err := st.InsertEvalRun(ctx, store.EvalRun{
 		ID:            evalID,
@@ -372,16 +373,19 @@ func TestExportImportEvalBundleRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := st.InsertExperiment(ctx, store.Experiment{
-		ID:        evalID,
+		ID:        expID,
+		EvalRunID: evalID,
 		Skill:     "dd",
+		Cohort:    "qa-skill-c6",
 		BaseRef:   "base",
 		HeadRef:   "head",
+		JudgeMode: "pairwise",
 		CreatedAt: created,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.InsertComparison(ctx, store.Comparison{
-		ExperimentID: evalID,
+		ExperimentID: expID,
 		FixtureID:    "fx-01",
 		Winner:       "B",
 		Rationale:    `{"policy":"anti-tie"}`,
@@ -411,6 +415,7 @@ func TestExportImportEvalBundleRoundTrip(t *testing.T) {
 	if err := st.InsertSuggestRun(ctx, store.SuggestRun{
 		ID:         "suggest-eval-bundle",
 		Skill:      "dd",
+		EvalRunID:  evalID,
 		MotifKey:   "motif",
 		Branch:     "suggest/dd/x",
 		CommitSHA:  "cafebabe",
@@ -418,6 +423,19 @@ func TestExportImportEvalBundleRoundTrip(t *testing.T) {
 		PRBodyPath: "runs/ab-eval-bundle/suggest/pr.md",
 		RunIDsJSON: `["rid-a","rid-b"]`,
 		CreatedAt:  created,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertSuggestRun(ctx, store.SuggestRun{
+		ID:         "suggest-other-eval",
+		Skill:      "dd",
+		MotifKey:   "motif-other",
+		Branch:     "suggest/dd/y",
+		CommitSHA:  "feedface",
+		PRBodyHash: "sha256:pr2",
+		PRBodyPath: "runs/ab-other-eval/suggest/pr.md",
+		RunIDsJSON: `["rid-c"]`,
+		CreatedAt:  created.Add(1 * time.Minute),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -480,7 +498,7 @@ func TestExportImportEvalBundleRoundTrip(t *testing.T) {
 		t.Fatalf("expected 1 eval_run row, got %d", evalCount)
 	}
 	var cmpCount int
-	if err := ist.DB().QueryRow(`SELECT COUNT(*) FROM comparisons WHERE experiment_id=?`, evalID).Scan(&cmpCount); err != nil {
+	if err := ist.DB().QueryRow(`SELECT COUNT(*) FROM comparisons WHERE experiment_id=?`, expID).Scan(&cmpCount); err != nil {
 		t.Fatal(err)
 	}
 	if cmpCount != 1 {
@@ -499,5 +517,12 @@ func TestExportImportEvalBundleRoundTrip(t *testing.T) {
 	}
 	if canaryCount != 1 {
 		t.Fatalf("expected 1 canary row, got %d", canaryCount)
+	}
+	var suggestCount int
+	if err := ist.DB().QueryRow(`SELECT COUNT(*) FROM suggest_runs WHERE eval_run_id=?`, evalID).Scan(&suggestCount); err != nil {
+		t.Fatal(err)
+	}
+	if suggestCount != 1 {
+		t.Fatalf("expected 1 suggest row scoped to eval, got %d", suggestCount)
 	}
 }
