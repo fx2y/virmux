@@ -155,7 +155,7 @@ if [[ "$auto_action" -eq 1 ]]; then
       sqlite3 -line "$db" "SELECT fixture_id, base_score, head_score FROM eval_cases WHERE eval_run_id='$(esc "$eval_id")' AND base_pass=1 AND head_pass=0 ORDER BY (base_score-head_score) DESC, fixture_id ASC LIMIT 10;"
     } > "$backlog_path"
     set +e
-    go run ./cmd/virmux skill promote --db "$db" --repo-dir "$repo_dir" --rollback --to-ref "$baseline_ref" --reason "canary regression eval=${eval_id} dset=$(basename "$dset")" "$skill" >"$action_out_file" 2>"$action_err_file"
+    go run ./cmd/virmux skill promote --db "$db" --repo-dir "$repo_dir" --rollback --to-ref "$baseline_ref" --reason "canary regression eval=${eval_id} dset=$(basename "$dset")" "$skill" "$eval_id" >"$action_out_file" 2>"$action_err_file"
     action_rc=$?
     set -e
   fi

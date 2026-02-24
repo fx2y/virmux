@@ -469,13 +469,7 @@ CREATE INDEX IF NOT EXISTS idx_eval_cases_run_fixture ON eval_cases(eval_run_id,
 CREATE INDEX IF NOT EXISTS idx_promotions_skill_created ON promotions(skill,created_at);
 CREATE INDEX IF NOT EXISTS idx_refine_runs_run_created ON refine_runs(run_id,created_at);
 CREATE INDEX IF NOT EXISTS idx_refine_runs_skill_created ON refine_runs(skill,created_at);
-CREATE INDEX IF NOT EXISTS idx_suggest_runs_skill_created ON suggest_runs(skill,created_at);
-CREATE INDEX IF NOT EXISTS idx_suggest_runs_eval_run ON suggest_runs(eval_run_id);
-CREATE INDEX IF NOT EXISTS idx_experiments_skill_created ON experiments(skill, created_at);
-CREATE INDEX IF NOT EXISTS idx_experiments_eval_run ON experiments(eval_run_id);
 CREATE INDEX IF NOT EXISTS idx_comparisons_experiment_fixture ON comparisons(experiment_id, fixture_id);
-CREATE INDEX IF NOT EXISTS idx_canary_runs_skill_created ON canary_runs(skill,created_at);
-CREATE INDEX IF NOT EXISTS idx_canary_runs_eval_run ON canary_runs(eval_run_id);
 `
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("ensure schema: %w", err)
@@ -534,6 +528,45 @@ CREATE INDEX IF NOT EXISTS idx_canary_runs_eval_run ON canary_runs(eval_run_id);
 	if _, err := db.Exec(`ALTER TABLE promotions ADD COLUMN op TEXT NOT NULL DEFAULT 'promote'`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("ensure promotions.op: %w", err)
 	}
+
+	// Migrating promotions.eval_run_id to nullable for rollback compatibility.
+	// SQLite doesn't support DROP NOT NULL, so we check and recreate if necessary.
+	var isNullable int
+	err := db.QueryRow(`SELECT "notnull" FROM pragma_table_info('promotions') WHERE name='eval_run_id'`).Scan(&isNullable)
+	if err == nil && isNullable == 1 {
+		migration := `
+			PRAGMA foreign_keys=OFF;
+			BEGIN TRANSACTION;
+			CREATE TABLE promotions_new (
+			  id TEXT PRIMARY KEY,
+			  skill TEXT NOT NULL,
+			  tag TEXT NOT NULL,
+			  base_ref TEXT NOT NULL,
+			  head_ref TEXT NOT NULL,
+			  from_ref TEXT NOT NULL DEFAULT '',
+			  to_ref TEXT NOT NULL DEFAULT '',
+			  reason TEXT NOT NULL DEFAULT '',
+			  metrics_json TEXT NOT NULL DEFAULT '{}',
+			  commit_sha TEXT NOT NULL DEFAULT '',
+			  op TEXT NOT NULL DEFAULT 'promote',
+			  eval_run_id TEXT,
+			  verdict_sha256 TEXT NOT NULL,
+			  actor TEXT NOT NULL DEFAULT '',
+			  created_at TEXT NOT NULL,
+			  FOREIGN KEY(eval_run_id) REFERENCES eval_runs(id) ON DELETE RESTRICT
+			);
+			INSERT INTO promotions_new (id, skill, tag, base_ref, head_ref, from_ref, to_ref, reason, metrics_json, commit_sha, op, eval_run_id, verdict_sha256, actor, created_at)
+			SELECT id, skill, tag, base_ref, head_ref, from_ref, to_ref, reason, metrics_json, commit_sha, op, eval_run_id, verdict_sha256, actor, created_at FROM promotions;
+			DROP TABLE promotions;
+			ALTER TABLE promotions_new RENAME TO promotions;
+			COMMIT;
+			PRAGMA foreign_keys=ON;
+		`
+		if _, err := db.Exec(migration); err != nil {
+			return fmt.Errorf("migrate promotions.eval_run_id to nullable: %w", err)
+		}
+	}
+
 	if _, err := db.Exec(`ALTER TABLE experiments ADD COLUMN eval_run_id TEXT`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("ensure experiments.eval_run_id: %w", err)
 	}
@@ -552,8 +585,14 @@ CREATE INDEX IF NOT EXISTS idx_canary_runs_eval_run ON canary_runs(eval_run_id);
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_canary_runs_eval_run ON canary_runs(eval_run_id)`); err != nil {
 		return fmt.Errorf("ensure idx_canary_runs_eval_run: %w", err)
 	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_suggest_runs_skill_created ON suggest_runs(skill,created_at)`); err != nil {
+		return fmt.Errorf("ensure idx_suggest_runs_skill_created: %w", err)
+	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_suggest_runs_eval_run ON suggest_runs(eval_run_id)`); err != nil {
 		return fmt.Errorf("ensure idx_suggest_runs_eval_run: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_experiments_skill_created ON experiments(skill, created_at)`); err != nil {
+		return fmt.Errorf("ensure idx_experiments_skill_created: %w", err)
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_experiments_eval_run ON experiments(eval_run_id)`); err != nil {
 		return fmt.Errorf("ensure idx_experiments_eval_run: %w", err)

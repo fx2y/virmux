@@ -876,10 +876,13 @@ func cmdSkillPromote(args []string) error {
 
 	var skillName, evalID string
 	if *rollback {
-		if len(fs.Args()) != 1 {
-			return errors.New("usage: virmux skill promote --rollback --to-ref <ref> <skill>")
+		if len(fs.Args()) < 1 || len(fs.Args()) > 2 {
+			return errors.New("usage: virmux skill promote --rollback --to-ref <ref> <skill> [eval-run-id]")
 		}
 		skillName = strings.TrimSpace(fs.Args()[0])
+		if len(fs.Args()) == 2 {
+			evalID = strings.TrimSpace(fs.Args()[1])
+		}
 	} else {
 		if len(fs.Args()) != 2 {
 			return errors.New("usage: virmux skill promote <skill> <eval-run-id>")

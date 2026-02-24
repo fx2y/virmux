@@ -92,6 +92,15 @@ func (s Service) Run(ctx context.Context, in Input) (Result, error) {
 		}
 		toRef = in.ToRef
 
+		// Optional: Link rollback to an eval run if provided
+		if in.EvalRunID != "" {
+			var err error
+			evalRun, err = s.Store.GetEvalRun(ctx, in.EvalRunID)
+			if err != nil {
+				return Result{}, fmt.Errorf("MISSING_AB_VERDICT (rollback link): %w", err)
+			}
+		}
+
 		// Get current ref for fromRef
 		res, err := resolveRef(ctx, ex, in.RepoDir, promoTag)
 		if err != nil {

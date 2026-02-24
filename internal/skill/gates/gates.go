@@ -51,7 +51,7 @@ func GateEval(run store.EvalRun) Verdict {
 			Details: details,
 		}
 	}
-	if !run.Pass || !doc.Pass {
+	if !run.Pass || !(doc.Pass || doc.Verdict.Pass) {
 		return Verdict{
 			Pass:    false,
 			Reason:  "AB_REGRESSION: eval run did not pass overall verdict",
@@ -73,7 +73,10 @@ func GateEval(run store.EvalRun) Verdict {
 }
 
 type verdictDoc struct {
-	Pass bool            `json:"pass"`
+	Pass    bool `json:"pass"`
+	Verdict struct {
+		Pass bool `json:"pass"`
+	} `json:"verdict"`
 	Hard map[string]bool `json:"hard,omitempty"`
 	Soft map[string]any  `json:"soft,omitempty"`
 }

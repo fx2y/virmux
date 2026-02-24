@@ -59,7 +59,7 @@ fi
 SH
 chmod +x "$fake_pf"
 
-pass_json="$(PF_MODE=pass go run ./cmd/virmux skill ab --db "$db" --runs-dir "$root/runs" --repo-dir "$root" --skills-dir skills --promptfoo-bin "$fake_pf" --cohort "$cohort" dd HEAD~0..HEAD)"
+pass_json="$(PF_MODE=pass go run ./cmd/virmux skill ab --judge pairwise --anti-tie --db "$db" --runs-dir "$root/runs" --repo-dir "$root" --skills-dir skills --promptfoo-bin "$fake_pf" --cohort "$cohort" dd HEAD~0..HEAD)"
 pass_id="$(jq -r '.id' <<<"$pass_json")"
 if [[ -z "$pass_id" || "$pass_id" == "null" ]]; then
   echo "skill:ab: missing pass eval id" >&2
@@ -73,7 +73,7 @@ fi
 
 go run ./cmd/virmux skill promote --db "$db" --repo-dir "$root" --tag "skill/dd/c3-test" dd "$pass_id" >/dev/null
 
-if PF_MODE=fail go run ./cmd/virmux skill ab --db "$db" --runs-dir "$root/runs" --repo-dir "$root" --skills-dir skills --promptfoo-bin "$fake_pf" --cohort "$cohort" dd HEAD~0..HEAD >/dev/null 2>&1; then
+if PF_MODE=fail go run ./cmd/virmux skill ab --judge pairwise --anti-tie --db "$db" --runs-dir "$root/runs" --repo-dir "$root" --skills-dir skills --promptfoo-bin "$fake_pf" --cohort "$cohort" dd HEAD~0..HEAD >/dev/null 2>&1; then
   echo "skill:ab: expected AB regression failure" >&2
   exit 1
 fi

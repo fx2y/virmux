@@ -114,7 +114,7 @@ pass_rc="$(run_canary pass "$pass_cohort" "$pass_out_file" "$pass_err_file" 0)"
 }
 pass_eval_id="$(jq -r '.eval_run_id // empty' <"$pass_out_file")"
 
-fail_rc="$(run_canary fail "$fail_cohort" "$fail_out_file" "$fail_err_file" 1)"
+fail_rc="$(run_canary fail "$fail_cohort" "$fail_out_file" "$fail_err_file" 0)"
 [[ "$fail_rc" -ne 0 ]] || {
   echo "skill:canary-cert: expected fail canary run to return non-zero" >&2
   cat "$fail_out_file" >&2

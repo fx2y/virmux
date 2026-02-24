@@ -26,6 +26,15 @@ func ValidateOutput(b []byte) (JudgeOutput, error) {
 	if len(out.Criterion) == 0 {
 		return out, fmt.Errorf("judge output missing criterion")
 	}
-	// TODO: add more strict validation (unique ids, value ranges)
+	ids := make(map[string]bool)
+	for _, c := range out.Criterion {
+		if ids[c.ID] {
+			return out, fmt.Errorf("duplicate criterion id: %s", c.ID)
+		}
+		ids[c.ID] = true
+		if c.Value < 0 || c.Value > 1 {
+			return out, fmt.Errorf("criterion %s value out of range [0,1]: %f", c.ID, c.Value)
+		}
+	}
 	return out, nil
 }
